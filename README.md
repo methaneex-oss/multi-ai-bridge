@@ -1,32 +1,10 @@
 # Multi-AI Bridge (Advanced)
 
-**Private (or public-test) real-time coordination system for multiple AI agents.**
+**Real-time coordination system for multiple AI agents.**
 
-Polyglot bridge so any models (via OpenRouter or direct keys) can work on the **same task** in sync, with a live UI and optional project rules.
+Any models (OpenRouter or direct keys) work on the same task with shared state, optional project rules, artifacts, and live UI.
 
 **Repo:** https://github.com/methaneex-oss/multi-ai-bridge
-
----
-
-## Architecture
-
-```
-Web UI (Next.js + WebSocket)
-        ↕
-Bridge Core (Go) — shared state, roles, contributions, WS hub
-        ↕
-Agent runners (Python) — OpenRouter / any provider, config-driven
-```
-
-| Path | Role |
-|------|------|
-| `bridge/` | Go core: REST + WebSocket + SQLite |
-| `web/` | Live dashboard |
-| `adapters/` | Python + TypeScript clients |
-| `agents/config.yaml` | Flexible agent definitions (no hardcoding) |
-| `runners/` | Calls models and posts contributions |
-| `examples/` | Task setup + demo scripts |
-| `docs/` | Protocol, deployment, free hosting |
 
 ---
 
@@ -36,45 +14,37 @@ Agent runners (Python) — OpenRouter / any provider, config-driven
 git clone https://github.com/methaneex-oss/multi-ai-bridge.git
 cd multi-ai-bridge
 cp .env.example .env
-# edit .env → OPENROUTER_API_KEY=...  and optionally BRIDGE_API_KEY=...
+# set OPENROUTER_API_KEY and optionally BRIDGE_API_KEY
 
 docker compose up -d --build
+pip install -r runners/requirements.txt
+
+python examples/create_project_and_upload.py
+python -m runners.run_once
 ```
 
 - UI: http://localhost:3000  
 - API: http://localhost:8080  
-- WebSocket: ws://localhost:8080/ws  
-
-```bash
-pip install -r runners/requirements.txt
-python examples/set_task_with_rules.py
-python -m runners.run_once
-```
+- WS: ws://localhost:8080/ws  
 
 ---
 
-## Design rules
+## What exists now
 
-- **No hardcoded AIs** — agents are role + model id in YAML  
-- **OpenRouter-first** — one key can drive many models  
-- **Optional project instructions** — injected into every agent run  
-- **Keys stay in `.env`** — never in the shared state or git  
+| Area | Status |
+|------|--------|
+| Go core + SQLite state | Yes |
+| Project instructions/rules | Yes |
+| WebSocket live push + CORS | Yes |
+| Multi-project + artifacts | Yes |
+| Agent turn lock | Yes |
+| OpenRouter / multi-key runners | Yes |
+| Config-driven agents (no hardcode) | Yes |
+| Next.js dashboard | Yes (basic) |
+| Runner Docker image | Yes |
+| Conflict UI / multi-tenant auth | Not yet |
+| Binary file uploads | Not yet (text artifacts only) |
 
-See `docs/AGENTS.md` and `docs/FREE_HOSTING.md`.
+Building continues — this is not a finished product.
 
----
-
-## Status (in progress — not finished)
-
-- [x] Go core + persistent state + roles + history  
-- [x] Project `instructions` field  
-- [x] WebSocket live push + CORS  
-- [x] Next.js dashboard (WS + timeline + rules)  
-- [x] Python/TS adapters + flexible runners  
-- [x] Example scripts  
-- [ ] Multi-project / file upload workspace  
-- [ ] Conflict resolution UI  
-- [ ] Stronger auth / multi-tenant  
-- [ ] Runner Docker service polished  
-
-Building continues.
+See `docs/PROTOCOL.md`, `docs/AGENTS.md`, `docs/FREE_HOSTING.md`.

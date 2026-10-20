@@ -1,6 +1,4 @@
-"""
-Minimal Python client for the Multi-AI Bridge.
-"""
+"""Python client for the Multi-AI Bridge."""
 
 from typing import Any, Dict, List, Optional
 import requests
@@ -30,6 +28,7 @@ class BridgeClient:
         goals: Optional[List[str]] = None,
         constraints: Optional[List[str]] = None,
         instructions: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload = {
             "title": title,
@@ -37,6 +36,7 @@ class BridgeClient:
             "goals": goals or [],
             "constraints": constraints or [],
             "instructions": instructions or "",
+            "project_id": project_id or "",
         }
         r = self.session.post(f"{self.base_url}/api/v1/task", json=payload)
         r.raise_for_status()
@@ -78,5 +78,56 @@ class BridgeClient:
 
     def get_roles(self) -> Dict[str, str]:
         r = self.session.get(f"{self.base_url}/api/v1/roles")
+        r.raise_for_status()
+        return r.json()
+
+    def create_project(self, name: str, description: str = "") -> Dict[str, Any]:
+        r = self.session.post(
+            f"{self.base_url}/api/v1/projects",
+            json={"name": name, "description": description},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def list_projects(self) -> List[Dict[str, Any]]:
+        r = self.session.get(f"{self.base_url}/api/v1/projects")
+        r.raise_for_status()
+        return r.json()
+
+    def add_artifact(
+        self,
+        name: str,
+        content: str,
+        kind: str = "note",
+        project_id: str = "",
+    ) -> Dict[str, Any]:
+        r = self.session.post(
+            f"{self.base_url}/api/v1/artifacts",
+            json={"name": name, "content": content, "kind": kind, "project_id": project_id},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def list_artifacts(self, project_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        params = {"project_id": project_id} if project_id else {}
+        r = self.session.get(f"{self.base_url}/api/v1/artifacts", params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def acquire_lock(self, agent_name: str) -> Dict[str, Any]:
+        r = self.session.post(
+            f"{self.base_url}/api/v1/lock",
+            json={"agent_name": agent_name, "action": "acquire"},
+        )
+        if r.status_code == 409:
+            return r.json()
+        r.raise_for_status()
+        return r.json()
+
+    def release_lock(self, agent_name: str) -> Dict[str, Any]:
+        r = self.session.post(
+            f"{self.base_url}/api/v1/lock",
+            json={"agent_name": agent_name, "action": "release"},
+        )
         r.raise_for_status()
         return r.json()
