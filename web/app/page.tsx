@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 type State = {
   task_title?: string;
   task_description?: string;
+  instructions?: string;
   goals?: string[];
   constraints?: string[];
   roles?: Record<string, string>;
@@ -27,36 +28,92 @@ export default function Home() {
   const [state, setState] = useState<State | null>(null);
   const [history, setHistory] = useState<Contribution[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
   const bridgeUrl = process.env.NEXT_PUBLIC_BRIDGE_URL || "http://localhost:8080";
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8080/ws";
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await fetch(`${bridgeUrl}/api/v1/history?limit=30`);
+      if (res.ok) setHistory(await res.json());
+    } catch { /* ignore */ }
+  }, [bridgeUrl]);
 
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [stateRes, histRes] = await Promise.all([
-          fetch(`${bridgeUrl}/api/v1/state`),
-          fetch(`${bridgeUrl}/api/v1/history?limit=30`),
-        ]);
-        if (!stateRes.ok) throw new Error(`State HTTP ${stateRes.status}`);
-        const data = await stateRes.json();
-        setState(data);
-        if (histRes.ok) {
-          setHistory(await histRes.json());
+    let ws: WebSocket | null = null;
+    let pollId: ReturnType<typeof setInterval> | null = null;
+    let closed = false;
+
+    const fallbackPoll = () => {
+      const tick = async () => {
+        try {
+          const res = await fetch(`${bridgeUrl}/api/v1/state`);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          setState(await res.json());
+          setError(null);
+          await loadHistory();
+        } catch (e: any) {
+          setError(e.message || "Failed to load");
         }
-        setError(null);
-      } catch (e: any) {
-        setError(e.message || "Failed to load");
-      }
+      };
+      tick();
+      pollId = setInterval(tick, 4000);
     };
-    load();
-    const id = setInterval(load, 4000);
-    return () => clearInterval(id);
-  }, [bridgeUrl]);
+
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        if (closed) return;
+        setLive(true);
+        setError(null);
+        loadHistory();
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.event === "state") setState(msg.data);
+          if (msg.event === "contribution") {
+            setHistory((prev) => [msg.data, ...prev].slice(0, 30));
+          }
+        } catch { /* ignore */ }
+      };
+      ws.onerror = () => {
+        setLive(false);
+        if (!pollId) fallbackPoll();
+      };
+      ws.onclose = () => {
+        setLive(false);
+        if (!closed && !pollId) fallbackPoll();
+      };
+    } catch {
+      fallbackPoll();
+    }
+
+    // always seed once via REST
+    fallbackPoll();
+
+    return () => {
+      closed = true;
+      if (ws) ws.close();
+      if (pollId) clearInterval(pollId);
+    };
+  }, [bridgeUrl, wsUrl, loadHistory]);
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: 24, maxWidth: 960, margin: "0 auto", background: "#0f1115", color: "#e8eaed", minHeight: "100vh" }}>
-      <header style={{ marginBottom: 32 }}>
-        <h1 style={{ margin: 0, fontSize: 28 }}>Multi-AI Bridge</h1>
-        <p style={{ color: "#9aa0a6", marginTop: 4 }}>Live coordination for multiple AI agents</p>
+      <header style={{ marginBottom: 32, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 28 }}>Multi-AI Bridge</h1>
+          <p style={{ color: "#9aa0a6", marginTop: 4 }}>Live coordination for multiple AI agents</p>
+        </div>
+        <span style={{
+          fontSize: 12, padding: "4px 10px", borderRadius: 999,
+          background: live ? "#0d3b2e" : "#3c1518",
+          color: live ? "#6ee7b7" : "#fca5a5",
+          border: `1px solid ${live ? "#065f46" : "#7f1d1d"}`,
+        }}>
+          {live ? "● Live (WebSocket)" : "○ Polling"}
+        </span>
       </header>
 
       {error && (
@@ -84,7 +141,16 @@ export default function Home() {
             )}
           </section>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+          {state.instructions && (
+            <section style={{ ...cardStyle, marginTop: 16, borderColor: "#3b4a6b" }}>
+              <h2 style={h2Style}>Project Instructions / Rules</h2>
+              <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 14, color: "#c5cae0" }}>
+                {state.instructions}
+              </pre>
+            </section>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 16 }}>
             <section style={cardStyle}>
               <h2 style={h2Style}>Agents & Roles</h2>
               {state.roles && Object.keys(state.roles).length > 0 ? (
@@ -113,7 +179,7 @@ export default function Home() {
             </section>
           </div>
 
-          <section style={cardStyle}>
+          <section style={{ ...cardStyle, marginTop: 16 }}>
             <h2 style={h2Style}>Decisions</h2>
             {state.decisions && state.decisions.length > 0 ? (
               <ul style={{ margin: 0, paddingLeft: 18 }}>
@@ -136,9 +202,9 @@ export default function Home() {
                       <span>
                         <strong style={{ color: "#e8eaed" }}>{c.agent_name}</strong>
                         <span style={{ color: "#8ab4f8", marginLeft: 8 }}>{c.role}</span>
-                        <span style={{ color: "#9aa0a6", marginLeft: 8 }}· {c.contribution_type}</span>
+                        <span style={{ color: "#9aa0a6", marginLeft: 8 }}>· {c.contribution_type}</span>
                       </span>
-                      <span style={{ color: "#9aa0a6" }}>{new Date(c.timestamp).toLocaleString()}</span>
+                      <span style={{ color: "#9aa0a6" }}>{c.timestamp ? new Date(c.timestamp).toLocaleString() : ""}</span>
                     </div>
                     <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 14, color: "#bdc1c6" }}>
                       {c.content}
@@ -159,7 +225,6 @@ const cardStyle: React.CSSProperties = {
   border: "1px solid #2a2e35",
   borderRadius: 12,
   padding: 20,
-  marginBottom: 0,
 };
 
 const h2Style: React.CSSProperties = {

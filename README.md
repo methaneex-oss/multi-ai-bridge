@@ -1,8 +1,8 @@
 # Multi-AI Bridge (Advanced)
 
-**Private real-time coordination system for multiple AI agents.**
+**Private (or public-test) real-time coordination system for multiple AI agents.**
 
-Polyglot bridge so Claude, Grok, GPT, Gemini, DeepSeek and any other agent can work on the **same task** in sync, with a live UI.
+Polyglot bridge so any models (via OpenRouter or direct keys) can work on the **same task** in sync, with a live UI and optional project rules.
 
 **Repo:** https://github.com/methaneex-oss/multi-ai-bridge
 
@@ -11,77 +11,70 @@ Polyglot bridge so Claude, Grok, GPT, Gemini, DeepSeek and any other agent can w
 ## Architecture
 
 ```
-Web UI (Next.js)  ↔  Bridge Core (Go)  ↔  Agent Adapters (Python + TypeScript)
+Web UI (Next.js + WebSocket)
+        ↕
+Bridge Core (Go) — shared state, roles, contributions, WS hub
+        ↕
+Agent runners (Python) — OpenRouter / any provider, config-driven
 ```
 
-| Directory | Language | Role |
-|-----------|----------|------|
-| `bridge/` | Go | Shared state, roles, contributions, history, REST API |
-| `web/` | TypeScript (Next.js) | Live dashboard + contribution timeline |
-| `adapters/python/` | Python | Client for Python-based agents |
-| `adapters/typescript/` | TypeScript | Client for JS/TS agents |
-| `examples/` | Python | Ready-to-run scripts |
-| `docs/` | Markdown | Protocol & deployment |
+| Path | Role |
+|------|------|
+| `bridge/` | Go core: REST + WebSocket + SQLite |
+| `web/` | Live dashboard |
+| `adapters/` | Python + TypeScript clients |
+| `agents/config.yaml` | Flexible agent definitions (no hardcoding) |
+| `runners/` | Calls models and posts contributions |
+| `examples/` | Task setup + demo scripts |
+| `docs/` | Protocol, deployment, free hosting |
 
 ---
 
-## Quick Start (Private Server)
+## Quick start
 
 ```bash
 git clone https://github.com/methaneex-oss/multi-ai-bridge.git
 cd multi-ai-bridge
 cp .env.example .env
+# edit .env → OPENROUTER_API_KEY=...  and optionally BRIDGE_API_KEY=...
+
 docker compose up -d --build
 ```
 
-- **UI**: http://localhost:3000  
-- **API**: http://localhost:8080  
-
-### First actions
+- UI: http://localhost:3000  
+- API: http://localhost:8080  
+- WebSocket: ws://localhost:8080/ws  
 
 ```bash
-# Set the shared task
-python examples/set_task.py
-
-# Assign roles
-python examples/assign_roles.py
-
-# Simulate agents contributing
-python examples/contribute_as_claude.py
-python examples/contribute_as_grok.py
+pip install -r runners/requirements.txt
+python examples/set_task_with_rules.py
+python -m runners.run_once
 ```
 
-Then open the UI to see the live state and timeline.
+---
+
+## Design rules
+
+- **No hardcoded AIs** — agents are role + model id in YAML  
+- **OpenRouter-first** — one key can drive many models  
+- **Optional project instructions** — injected into every agent run  
+- **Keys stay in `.env`** — never in the shared state or git  
+
+See `docs/AGENTS.md` and `docs/FREE_HOSTING.md`.
 
 ---
 
-## Agent Protocol
+## Status (in progress — not finished)
 
-1. `GET /api/v1/state` — read shared state  
-2. Do the work for your role  
-3. `POST /api/v1/contribute` — write result back  
+- [x] Go core + persistent state + roles + history  
+- [x] Project `instructions` field  
+- [x] WebSocket live push + CORS  
+- [x] Next.js dashboard (WS + timeline + rules)  
+- [x] Python/TS adapters + flexible runners  
+- [x] Example scripts  
+- [ ] Multi-project / file upload workspace  
+- [ ] Conflict resolution UI  
+- [ ] Stronger auth / multi-tenant  
+- [ ] Runner Docker service polished  
 
-Full contract in `docs/PROTOCOL.md`.
-
----
-
-## Security
-
-- Run only on your private server
-- Optional `BRIDGE_API_KEY` (set in `.env`)
-- Use firewall, Tailscale, or reverse proxy
-- Never expose port 8080 publicly without authentication
-
----
-
-## Status
-
-- [x] Go core with persistent shared state
-- [x] REST API (task, contribute, history, roles)
-- [x] Next.js live dashboard + contribution timeline
-- [x] Python + TypeScript adapters
-- [x] Example scripts
-- [ ] Full WebSocket push (next iteration)
-- [ ] Auth hardening / multi-tenant (optional)
-
-Built for serious multi-AI collaboration.
+Building continues.
