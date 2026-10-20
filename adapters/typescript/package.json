@@ -1,0 +1,12 @@
+{
+  "name": "@multi-ai-bridge/client",
+  "version": "0.1.0",
+  "main": "client.ts",
+  "types": "client.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.3"
+  }
+}
