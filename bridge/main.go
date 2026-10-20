@@ -9,13 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type State struct {
 	TaskTitle       string            `json:"task_title"`
 	TaskDescription string            `json:"task_description"`
-	Instructions    string            `json:"instructions"` // optional project rules every agent must follow
+	Instructions    string            `json:"instructions"`
 	Goals           []string          `json:"goals"`
 	Constraints     []string          `json:"constraints"`
 	Roles           map[string]string `json:"roles"`
@@ -42,7 +43,88 @@ type Server struct {
 	mu     sync.RWMutex
 	state  State
 	apiKey string
+	hub    *Hub
 }
+
+// ── WebSocket hub ──
+
+type Hub struct {
+	clients    map[*websocket.Conn]bool
+	broadcast  chan []byte
+	register   chan *websocket.Conn
+	unregister chan *websocket.Conn
+	mu         sync.Mutex
+}
+
+func newHub() *Hub {
+	return &Hub{
+		clients:    make(map[*websocket.Conn]bool),
+		broadcast:  make(chan []byte, 64),
+		register:   make(chan *websocket.Conn),
+		unregister: make(chan *websocket.Conn),
+	}
+}
+
+func (h *Hub) run() {
+	for {
+		select {
+		case c := <-h.register:
+			h.mu.Lock()
+			h.clients[c] = true
+			h.mu.Unlock()
+		case c := <-h.unregister:
+			h.mu.Lock()
+			if _, ok := h.clients[c]; ok {
+				delete(h.clients, c)
+				c.Close()
+			}
+			h.mu.Unlock()
+		case msg := <-h.broadcast:
+			h.mu.Lock()
+			for c := range h.clients {
+				if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+					c.Close()
+					delete(h.clients, c)
+				}
+			}
+			h.mu.Unlock()
+		}
+	}
+}
+
+func (h *Hub) publish(event string, payload interface{}) {
+	b, _ := json.Marshal(map[string]interface{}{"event": event, "data": payload})
+	select {
+	case h.broadcast <- b:
+	default:
+	}
+}
+
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	s.hub.register <- c
+	// send current state immediately
+	s.mu.RLock()
+	st := s.state
+	s.mu.RUnlock()
+	b, _ := json.Marshal(map[string]interface{}{"event": "state", "data": st})
+	_ = c.WriteMessage(websocket.TextMessage, b)
+	go func() {
+		defer func() { s.hub.unregister <- c }()
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// ── main ──
 
 func main() {
 	port := os.Getenv("BRIDGE_PORT")
@@ -56,18 +138,19 @@ func main() {
 	apiKey := os.Getenv("BRIDGE_API_KEY")
 
 	os.MkdirAll("./data", 0755)
-
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-
 	if err := initDB(db); err != nil {
 		log.Fatal(err)
 	}
 
-	s := &Server{db: db, apiKey: apiKey}
+	hub := newHub()
+	go hub.run()
+
+	s := &Server{db: db, apiKey: apiKey, hub: hub}
 	s.state = State{
 		Roles:         make(map[string]string),
 		Goals:         []string{},
@@ -80,16 +163,30 @@ func main() {
 	s.loadState()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/api/v1/state", s.auth(s.handleState))
-	mux.HandleFunc("/api/v1/task", s.auth(s.handleTask))
-	mux.HandleFunc("/api/v1/contribute", s.auth(s.handleContribute))
-	mux.HandleFunc("/api/v1/history", s.auth(s.handleHistory))
-	mux.HandleFunc("/api/v1/role", s.auth(s.handleRole))
-	mux.HandleFunc("/api/v1/roles", s.auth(s.handleRoles))
+	mux.HandleFunc("/health", withCORS(s.handleHealth))
+	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/v1/state", withCORS(s.auth(s.handleState)))
+	mux.HandleFunc("/api/v1/task", withCORS(s.auth(s.handleTask)))
+	mux.HandleFunc("/api/v1/contribute", withCORS(s.auth(s.handleContribute)))
+	mux.HandleFunc("/api/v1/history", withCORS(s.auth(s.handleHistory)))
+	mux.HandleFunc("/api/v1/role", withCORS(s.auth(s.handleRole)))
+	mux.HandleFunc("/api/v1/roles", withCORS(s.auth(s.handleRoles)))
 
-	log.Printf("Multi-AI Bridge listening on :%s", port)
+	log.Printf("Multi-AI Bridge listening on :%s (REST + WebSocket /ws)", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
+}
+
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func initDB(db *sql.DB) error {
@@ -143,7 +240,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Title        string   `json:"title"`
 		Description  string   `json:"description"`
-		Instructions string   `json:"instructions"` // optional project rules
+		Instructions string   `json:"instructions"`
 		Goals        []string `json:"goals"`
 		Constraints  []string `json:"constraints"`
 	}
@@ -160,10 +257,12 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	s.state.CurrentStatus = "active"
 	s.state.LastUpdated = time.Now().UTC()
 	s.state.Version++
+	st := s.state
 	s.saveState()
 	s.mu.Unlock()
+	s.hub.publish("state", st)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.state)
+	json.NewEncoder(w).Encode(st)
 }
 
 func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
@@ -189,10 +288,11 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	if body.RelatedTo != nil {
 		related = *body.RelatedTo
 	}
+	ts := time.Now().UTC()
 	_, err := s.db.Exec(
 		`INSERT INTO contributions (id, timestamp, agent_name, role, content, contribution_type, related_to, metadata)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, time.Now().UTC().Format(time.RFC3339), body.AgentName, body.Role, body.Content, body.ContributionType, related, string(meta),
+		id, ts.Format(time.RFC3339), body.AgentName, body.Role, body.Content, body.ContributionType, related, string(meta),
 	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -200,7 +300,7 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.state.CurrentStatus = "last contribution by " + body.AgentName + " (" + body.Role + ")"
-	s.state.LastUpdated = time.Now().UTC()
+	s.state.LastUpdated = ts
 	s.state.Version++
 	if body.ContributionType == "question" {
 		s.state.OpenQuestions = append(s.state.OpenQuestions, body.Content)
@@ -208,8 +308,18 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	if body.ContributionType == "decision" {
 		s.state.Decisions = append(s.state.Decisions, body.Content)
 	}
+	st := s.state
 	s.saveState()
 	s.mu.Unlock()
+
+	contrib := Contribution{
+		ID: id, Timestamp: ts, AgentName: body.AgentName, Role: body.Role,
+		Content: body.Content, ContributionType: body.ContributionType,
+		RelatedTo: body.RelatedTo, Metadata: body.Metadata,
+	}
+	s.hub.publish("contribution", contrib)
+	s.hub.publish("state", st)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "ok"})
 }
@@ -260,10 +370,12 @@ func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 	s.state.Roles[body.AgentName] = body.Role
 	s.state.LastUpdated = time.Now().UTC()
 	s.state.Version++
+	st := s.state
 	s.saveState()
 	s.mu.Unlock()
+	s.hub.publish("state", st)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.state)
+	json.NewEncoder(w).Encode(st)
 }
 
 func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {

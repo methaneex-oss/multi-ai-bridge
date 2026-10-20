@@ -23,12 +23,20 @@ class BridgeClient:
         r.raise_for_status()
         return r.json()
 
-    def set_task(self, title: str, description: str, goals: Optional[List[str]] = None, constraints: Optional[List[str]] = None) -> Dict[str, Any]:
+    def set_task(
+        self,
+        title: str,
+        description: str,
+        goals: Optional[List[str]] = None,
+        constraints: Optional[List[str]] = None,
+        instructions: Optional[str] = None,
+    ) -> Dict[str, Any]:
         payload = {
             "title": title,
             "description": description,
             "goals": goals or [],
             "constraints": constraints or [],
+            "instructions": instructions or "",
         }
         r = self.session.post(f"{self.base_url}/api/v1/task", json=payload)
         r.raise_for_status()
@@ -56,7 +64,10 @@ class BridgeClient:
         return r.json()
 
     def assign_role(self, agent_name: str, role: str) -> Dict[str, Any]:
-        r = self.session.post(f"{self.base_url}/api/v1/role", json={"agent_name": agent_name, "role": role})
+        r = self.session.post(
+            f"{self.base_url}/api/v1/role",
+            json={"agent_name": agent_name, "role": role},
+        )
         r.raise_for_status()
         return r.json()
 
