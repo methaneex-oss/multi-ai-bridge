@@ -15,6 +15,7 @@ import (
 type State struct {
 	TaskTitle       string            `json:"task_title"`
 	TaskDescription string            `json:"task_description"`
+	Instructions    string            `json:"instructions"` // optional project rules every agent must follow
 	Goals           []string          `json:"goals"`
 	Constraints     []string          `json:"constraints"`
 	Roles           map[string]string `json:"roles"`
@@ -140,10 +141,11 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title       string   `json:"title"`
-		Description string   `json:"description"`
-		Goals       []string `json:"goals"`
-		Constraints []string `json:"constraints"`
+		Title        string   `json:"title"`
+		Description  string   `json:"description"`
+		Instructions string   `json:"instructions"` // optional project rules
+		Goals        []string `json:"goals"`
+		Constraints  []string `json:"constraints"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -152,6 +154,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.state.TaskTitle = body.Title
 	s.state.TaskDescription = body.Description
+	s.state.Instructions = body.Instructions
 	s.state.Goals = body.Goals
 	s.state.Constraints = body.Constraints
 	s.state.CurrentStatus = "active"
