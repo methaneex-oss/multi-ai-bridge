@@ -1,99 +1,74 @@
 # Multi-AI Bridge Protocol
 
-This is the contract every AI agent must follow.
+## Core rule
 
-## Core Rule
-
-There is **one shared state**.  
-Every agent must:
-
-1. Read the current state  
-2. Do its work  
-3. Post its contribution back to the bridge  
-
-Never keep private knowledge that is not in the bridge.
+One shared state. Every agent must read it, act, and post contributions back.
 
 ---
 
 ## Endpoints
 
-### Health
-`GET /health`
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Liveness |
+| GET | `/api/v1/state` | Shared state (includes instructions, lock, project_id) |
+| POST | `/api/v1/task` | Set/update task + optional instructions |
+| POST | `/api/v1/contribute` | Post agent output |
+| GET | `/api/v1/history` | Recent contributions |
+| POST | `/api/v1/role` | Assign role |
+| GET | `/api/v1/roles` | List roles |
+| GET/POST | `/api/v1/projects` | List / create projects |
+| GET/POST | `/api/v1/artifacts` | List / upload text artifacts (specs, notes, file contents) |
+| POST | `/api/v1/lock` | Acquire or release agent turn lock |
+| WS | `/ws` | Live events: `state`, `contribution`, `artifact` |
 
-### Shared State
-`GET /api/v1/state`
+Auth (optional): header `X-API-Key: <BRIDGE_API_KEY>`.
 
-Returns the current task, goals, constraints, roles, open questions, decisions, and status.
+---
 
-### Set / Update Task
-`POST /api/v1/task`
+## Task body
 
 ```json
 {
-  "title": "Build the core cognitive loop",
+  "title": "...",
   "description": "...",
-  "goals": ["..."],
-  "constraints": ["..."]
+  "instructions": "optional rules all agents must follow",
+  "goals": [],
+  "constraints": [],
+  "project_id": "optional"
 }
 ```
 
-### Contribute
-`POST /api/v1/contribute`
+## Contribution body
 
 ```json
 {
-  "agent_name": "Grok",
+  "agent_name": "architect",
   "role": "Architect",
   "contribution_type": "plan",
-  "content": "Here is the proposed design...",
+  "content": "...",
   "related_to": null,
-  "metadata": {}
+  "metadata": { "model": "anthropic/claude-sonnet-4" }
 }
 ```
 
-Allowed `contribution_type` values:
-- `plan`
-- `code`
-- `review`
-- `test`
-- `critique`
-- `decision`
-- `question`
-- `answer`
-- `status`
-- `update`
+## Lock body
 
-### History
-`GET /api/v1/history?limit=50`
+```json
+{ "agent_name": "coder", "action": "acquire" }
+```
 
-### Assign Role
-`POST /api/v1/role`
+Returns 409 if another agent holds the lock.
+
+## Artifact body
 
 ```json
 {
-  "agent_name": "Claude",
-  "role": "Architect"
+  "project_id": "...",
+  "name": "spec.md",
+  "kind": "file",
+  "content": "# Spec\n..."
 }
 ```
 
-### List Roles
-`GET /api/v1/roles`
-
----
-
-## Recommended Agent Workflow
-
-1. `GET /api/v1/state`
-2. `GET /api/v1/history?limit=20` (optional)
-3. Perform work according to assigned role
-4. `POST /api/v1/contribute`
-
----
-
-## Authentication
-
-If `BRIDGE_API_KEY` is set, every request must include:
-
-```
-X-API-Key: your-secret-key
-```
+Kinds: `file`, `note`, `link`, `spec`.

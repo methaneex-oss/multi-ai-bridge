@@ -14,6 +14,7 @@ import (
 )
 
 type State struct {
+	ProjectID       string            `json:"project_id"`
 	TaskTitle       string            `json:"task_title"`
 	TaskDescription string            `json:"task_description"`
 	Instructions    string            `json:"instructions"`
@@ -23,8 +24,25 @@ type State struct {
 	OpenQuestions   []string          `json:"open_questions"`
 	Decisions       []string          `json:"decisions"`
 	CurrentStatus   string            `json:"current_status"`
+	AgentLock       string            `json:"agent_lock"` // agent id holding the turn, or ""
 	LastUpdated     time.Time         `json:"last_updated"`
 	Version         int               `json:"version"`
+}
+
+type Project struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type Artifact struct {
+	ID        string    `json:"id"`
+	ProjectID string    `json:"project_id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"` // file, note, link, spec
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Contribution struct {
@@ -45,8 +63,6 @@ type Server struct {
 	apiKey string
 	hub    *Hub
 }
-
-// ── WebSocket hub ──
 
 type Hub struct {
 	clients    map[*websocket.Conn]bool
@@ -108,7 +124,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.register <- c
-	// send current state immediately
 	s.mu.RLock()
 	st := s.state
 	s.mu.RUnlock()
@@ -123,8 +138,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 }
-
-// ── main ──
 
 func main() {
 	port := os.Getenv("BRIDGE_PORT")
@@ -171,8 +184,11 @@ func main() {
 	mux.HandleFunc("/api/v1/history", withCORS(s.auth(s.handleHistory)))
 	mux.HandleFunc("/api/v1/role", withCORS(s.auth(s.handleRole)))
 	mux.HandleFunc("/api/v1/roles", withCORS(s.auth(s.handleRoles)))
+	mux.HandleFunc("/api/v1/projects", withCORS(s.auth(s.handleProjects)))
+	mux.HandleFunc("/api/v1/artifacts", withCORS(s.auth(s.handleArtifacts)))
+	mux.HandleFunc("/api/v1/lock", withCORS(s.auth(s.handleLock)))
 
-	log.Printf("Multi-AI Bridge listening on :%s (REST + WebSocket /ws)", port)
+	log.Printf("Multi-AI Bridge listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
@@ -205,17 +221,29 @@ func initDB(db *sql.DB) error {
 			related_to TEXT,
 			metadata TEXT
 		);
+		CREATE TABLE IF NOT EXISTS projects (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT,
+			created_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS artifacts (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
 	`)
 	return err
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.apiKey != "" {
-			if r.Header.Get("X-API-Key") != s.apiKey {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if s.apiKey != "" && r.Header.Get("X-API-Key") != s.apiKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 		next(w, r)
 	}
@@ -243,6 +271,7 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		Instructions string   `json:"instructions"`
 		Goals        []string `json:"goals"`
 		Constraints  []string `json:"constraints"`
+		ProjectID    string   `json:"project_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -254,6 +283,9 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	s.state.Instructions = body.Instructions
 	s.state.Goals = body.Goals
 	s.state.Constraints = body.Constraints
+	if body.ProjectID != "" {
+		s.state.ProjectID = body.ProjectID
+	}
 	s.state.CurrentStatus = "active"
 	s.state.LastUpdated = time.Now().UTC()
 	s.state.Version++
@@ -308,6 +340,10 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	if body.ContributionType == "decision" {
 		s.state.Decisions = append(s.state.Decisions, body.Content)
 	}
+	// release lock if this agent held it
+	if s.state.AgentLock == body.AgentName {
+		s.state.AgentLock = ""
+	}
 	st := s.state
 	s.saveState()
 	s.mu.Unlock()
@@ -319,7 +355,6 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.publish("contribution", contrib)
 	s.hub.publish("state", st)
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"id": id, "status": "ok"})
 }
@@ -383,6 +418,159 @@ func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.state.Roles)
+}
+
+func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.db.Query(`SELECT id, name, description, created_at FROM projects ORDER BY created_at DESC`)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer rows.Close()
+		var list []Project
+		for rows.Next() {
+			var p Project
+			var ts string
+			if err := rows.Scan(&p.ID, &p.Name, &p.Description, &ts); err != nil {
+				continue
+			}
+			p.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+			list = append(list, p)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(list)
+	case http.MethodPost:
+		var body struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		id := time.Now().Format("20060102150405")
+		ts := time.Now().UTC()
+		_, err := s.db.Exec(`INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
+			id, body.Name, body.Description, ts.Format(time.RFC3339))
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		s.mu.Lock()
+		s.state.ProjectID = id
+		s.state.LastUpdated = ts
+		s.state.Version++
+		st := s.state
+		s.saveState()
+		s.mu.Unlock()
+		s.hub.publish("state", st)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(Project{ID: id, Name: body.Name, Description: body.Description, CreatedAt: ts})
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		pid := r.URL.Query().Get("project_id")
+		var rows *sql.Rows
+		var err error
+		if pid != "" {
+			rows, err = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts WHERE project_id = ? ORDER BY created_at DESC`, pid)
+		} else {
+			rows, err = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts ORDER BY created_at DESC LIMIT 100`)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		defer rows.Close()
+		var list []Artifact
+		for rows.Next() {
+			var a Artifact
+			var ts string
+			if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Kind, &a.Content, &ts); err != nil {
+				continue
+			}
+			a.CreatedAt, _ = time.Parse(time.RFC3339, ts)
+			list = append(list, a)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(list)
+	case http.MethodPost:
+		var body struct {
+			ProjectID string `json:"project_id"`
+			Name      string `json:"name"`
+			Kind      string `json:"kind"`
+			Content   string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if body.Kind == "" {
+			body.Kind = "note"
+		}
+		id := time.Now().Format("20060102150405.000000000")
+		ts := time.Now().UTC()
+		_, err := s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			id, body.ProjectID, body.Name, body.Kind, body.Content, ts.Format(time.RFC3339))
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		a := Artifact{ID: id, ProjectID: body.ProjectID, Name: body.Name, Kind: body.Kind, Content: body.Content, CreatedAt: ts}
+		s.hub.publish("artifact", a)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(a)
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var body struct {
+		AgentName string `json:"agent_name"`
+		Action    string `json:"action"` // acquire | release
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch body.Action {
+	case "acquire":
+		if s.state.AgentLock != "" && s.state.AgentLock != body.AgentName {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"status": "busy", "held_by": s.state.AgentLock})
+			return
+		}
+		s.state.AgentLock = body.AgentName
+	case "release":
+		if s.state.AgentLock == body.AgentName {
+			s.state.AgentLock = ""
+		}
+	default:
+		http.Error(w, "action must be acquire or release", 400)
+		return
+	}
+	s.state.LastUpdated = time.Now().UTC()
+	s.state.Version++
+	st := s.state
+	s.saveState()
+	s.hub.publish("state", st)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(st)
 }
 
 func (s *Server) saveState() {
