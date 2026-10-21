@@ -1,0 +1,34 @@
+# Render Blueprint — optional multi-service deploy
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: multi-ai-bridge-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: BRIDGE_PORT
+        value: "8080"
+      - key: DATABASE_PATH
+        value: /data/bridge.db
+      - key: BRIDGE_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+
+  # Optional UI (requires paid or separate free service + correct NEXT_PUBLIC_* URLs)
+  # - type: web
+  #   name: multi-ai-bridge-ui
+  #   runtime: docker
+  #   dockerfilePath: ./web/Dockerfile
+  #   dockerContext: ./web
+  #   plan: free
+  #   envVars:
+  #     - key: NEXT_PUBLIC_BRIDGE_URL
+  #       fromService:
+  #         name: multi-ai-bridge-api
+  #         type: web
+  #         property: host
