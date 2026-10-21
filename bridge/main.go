@@ -87,10 +87,8 @@ type Hub struct {
 
 func newHub() *Hub {
 	return &Hub{
-		clients:    make(map[*websocket.Conn]bool),
-		broadcast:  make(chan []byte, 64),
-		register:   make(chan *websocket.Conn),
-		unregister: make(chan *websocket.Conn),
+		clients: make(map[*websocket.Conn]bool), broadcast: make(chan []byte, 64),
+		register: make(chan *websocket.Conn), unregister: make(chan *websocket.Conn),
 	}
 }
 
@@ -152,6 +150,25 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Multi-AI Bridge API</title>
+<style>body{font-family:system-ui;background:#0f1115;color:#e8eaed;padding:2rem;max-width:40rem;margin:auto}a{color:#8ab4f8}code{background:#1a1d23;padding:2px 6px;border-radius:4px}</style></head><body>
+<h1>Multi-AI Bridge API</h1>
+<p>Backend is running. This host is the <strong>API</strong>, not the full dashboard.</p>
+<ul>
+<li><a href="/health">/health</a> — status</li>
+<li><code>/api/v1/state</code> — shared state</li>
+<li><code>/ws</code> — WebSocket</li>
+</ul>
+<p>Deploy the <strong>UI</strong> as a second Render Web Service (<code>web/Dockerfile</code>) and optional <strong>runners</strong> worker for LLMs. See docs/RENDER_FULL.md</p>
+</body></html>`))
+}
+
 func main() {
 	port := os.Getenv("BRIDGE_PORT")
 	if port == "" {
@@ -164,7 +181,6 @@ func main() {
 	apiKey := os.Getenv("BRIDGE_API_KEY")
 
 	_ = os.MkdirAll("./data", 0755)
-	// modernc.org/sqlite registers as driver name "sqlite"
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		log.Fatal(err)
@@ -186,6 +202,7 @@ func main() {
 	s.loadState()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", withCORS(s.handleRoot))
 	mux.HandleFunc("/health", withCORS(s.handleHealth))
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/api/v1/state", withCORS(s.auth(s.handleState)))
