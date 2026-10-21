@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type State struct {
@@ -48,9 +48,9 @@ type Artifact struct {
 type Job struct {
 	ID        string     `json:"id"`
 	ProjectID string     `json:"project_id"`
-	Type      string     `json:"type"` // build | test | run | script
+	Type      string     `json:"type"`
 	Command   string     `json:"command"`
-	Status    string     `json:"status"` // queued | running | succeeded | failed | cancelled
+	Status    string     `json:"status"`
 	Output    string     `json:"output"`
 	CreatedBy string     `json:"created_by"`
 	CreatedAt time.Time  `json:"created_at"`
@@ -163,8 +163,9 @@ func main() {
 	}
 	apiKey := os.Getenv("BRIDGE_API_KEY")
 
-	os.MkdirAll("./data", 0755)
-	db, err := sql.Open("sqlite3", dbPath)
+	_ = os.MkdirAll("./data", 0755)
+	// modernc.org/sqlite registers as driver name "sqlite"
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -245,6 +246,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "multi-ai-bridge"})
 }
 
@@ -329,7 +331,8 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	st := s.state
 	s.saveState()
 	s.mu.Unlock()
-	contrib := Contribution{ID: id, Timestamp: ts, AgentName: body.AgentName, Role: body.Role, Content: body.Content, ContributionType: body.ContributionType, RelatedTo: body.RelatedTo, Metadata: body.Metadata}
+	contrib := Contribution{ID: id, Timestamp: ts, AgentName: body.AgentName, Role: body.Role, Content: body.Content,
+		ContributionType: body.ContributionType, RelatedTo: body.RelatedTo, Metadata: body.Metadata}
 	s.hub.publish("contribution", contrib)
 	s.hub.publish("state", st)
 	w.Header().Set("Content-Type", "application/json")
@@ -354,8 +357,11 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		if related != "" {
 			c.RelatedTo = &related
 		}
-		json.Unmarshal([]byte(meta), &c.Metadata)
+		_ = json.Unmarshal([]byte(meta), &c.Metadata)
 		list = append(list, c)
+	}
+	if list == nil {
+		list = []Contribution{}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
@@ -412,6 +418,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 			p.CreatedAt, _ = time.Parse(time.RFC3339, ts)
 			list = append(list, p)
 		}
+		if list == nil {
+			list = []Project{}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
@@ -422,7 +431,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		}
 		id := time.Now().Format("20060102150405")
 		ts := time.Now().UTC()
-		s.db.Exec(`INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)`, id, body.Name, body.Description, ts.Format(time.RFC3339))
+		_, _ = s.db.Exec(`INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)`, id, body.Name, body.Description, ts.Format(time.RFC3339))
 		s.mu.Lock()
 		s.state.ProjectID = id
 		s.state.LastUpdated = ts
@@ -464,6 +473,9 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 			a.CreatedAt, _ = time.Parse(time.RFC3339, ts)
 			list = append(list, a)
 		}
+		if list == nil {
+			list = []Artifact{}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
@@ -477,7 +489,7 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 		}
 		id := time.Now().Format("20060102150405.000000000")
 		ts := time.Now().UTC()
-		s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		_, _ = s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			id, body.ProjectID, body.Name, body.Kind, body.Content, ts.Format(time.RFC3339))
 		a := Artifact{ID: id, ProjectID: body.ProjectID, Name: body.Name, Kind: body.Kind, Content: body.Content, CreatedAt: ts}
 		s.hub.publish("artifact", a)
@@ -555,6 +567,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			}
 			list = append(list, j)
 		}
+		if list == nil {
+			list = []Job{}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
@@ -577,7 +592,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		id := time.Now().Format("20060102150405.000000000")
 		ts := time.Now().UTC()
-		s.db.Exec(`INSERT INTO jobs (id, project_id, type, command, status, output, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		_, _ = s.db.Exec(`INSERT INTO jobs (id, project_id, type, command, status, output, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, body.ProjectID, body.Type, body.Command, "queued", "", body.CreatedBy, ts.Format(time.RFC3339))
 		j := Job{ID: id, ProjectID: body.ProjectID, Type: body.Type, Command: body.Command, Status: "queued", CreatedBy: body.CreatedBy, CreatedAt: ts}
 		s.hub.publish("job", j)
@@ -590,13 +605,13 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) saveState() {
 	data, _ := json.Marshal(s.state)
-	s.db.Exec(`INSERT OR REPLACE INTO state (id, data) VALUES (1, ?)`, string(data))
+	_, _ = s.db.Exec(`INSERT OR REPLACE INTO state (id, data) VALUES (1, ?)`, string(data))
 }
 
 func (s *Server) loadState() {
 	var data string
 	if s.db.QueryRow(`SELECT data FROM state WHERE id = 1`).Scan(&data) == nil {
-		json.Unmarshal([]byte(data), &s.state)
+		_ = json.Unmarshal([]byte(data), &s.state)
 		if s.state.Roles == nil {
 			s.state.Roles = map[string]string{}
 		}
