@@ -1,7 +1,8 @@
-# Render Blueprint — optional multi-service deploy
-# Docs: https://render.com/docs/blueprint-spec
+# Full stack on Render (API + UI + optional agent worker)
+# https://render.com/docs/blueprint-spec
 
 services:
+  # 1) Core API (shared state, WS, projects, jobs)
   - type: web
     name: multi-ai-bridge-api
     runtime: docker
@@ -15,20 +16,41 @@ services:
       - key: DATABASE_PATH
         value: /data/bridge.db
       - key: BRIDGE_API_KEY
-        sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false
+        sync: false   # set in dashboard — keep secret
 
-  # Optional UI (requires paid or separate free service + correct NEXT_PUBLIC_* URLs)
-  # - type: web
-  #   name: multi-ai-bridge-ui
+  # 2) Next.js UI (talks to API via server-side proxy)
+  - type: web
+    name: multi-ai-bridge-ui
+    runtime: docker
+    dockerfilePath: ./web/Dockerfile
+    dockerContext: ./web
+    plan: free
+    envVars:
+      - key: BRIDGE_URL
+        fromService:
+          name: multi-ai-bridge-api
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: BRIDGE_API_KEY
+        sync: false
+      - key: NEXT_PUBLIC_WS_URL
+        sync: false   # set to wss://YOUR-API.onrender.com/ws after first deploy
+
+  # 3) Optional: LLM agent loop (put OPENROUTER key only here)
+  # Uncomment if you want agents running 24/7 on Render
+  # - type: worker
+  #   name: multi-ai-bridge-runners
   #   runtime: docker
-  #   dockerfilePath: ./web/Dockerfile
-  #   dockerContext: ./web
+  #   dockerfilePath: ./runners/Dockerfile
+  #   dockerContext: .
   #   plan: free
   #   envVars:
-  #     - key: NEXT_PUBLIC_BRIDGE_URL
+  #     - key: BRIDGE_URL
   #       fromService:
   #         name: multi-ai-bridge-api
   #         type: web
-  #         property: host
+  #         envVarKey: RENDER_EXTERNAL_URL
+  #     - key: BRIDGE_API_KEY
+  #       sync: false
+  #     - key: OPENROUTER_API_KEY
+  #       sync: false
