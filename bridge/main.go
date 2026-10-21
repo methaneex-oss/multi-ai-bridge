@@ -6,9 +6,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +45,19 @@ type Artifact struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type Job struct {
+	ID        string     `json:"id"`
+	ProjectID string     `json:"project_id"`
+	Type      string     `json:"type"` // build | test | run | script
+	Command   string     `json:"command"`
+	Status    string     `json:"status"` // queued | running | succeeded | failed | cancelled
+	Output    string     `json:"output"`
+	CreatedBy string     `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	EndedAt   *time.Time `json:"ended_at,omitempty"`
+}
+
 type Contribution struct {
 	ID               string                 `json:"id"`
 	Timestamp        time.Time              `json:"timestamp"`
@@ -59,25 +69,12 @@ type Contribution struct {
 	Metadata         map[string]interface{} `json:"metadata"`
 }
 
-type Job struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	Kind      string    `json:"kind"` // build | test | run | custom
-	Command   string    `json:"command"`
-	Status    string    `json:"status"` // queued | running | succeeded | failed
-	Log       string    `json:"log"`
-	CreatedAt time.Time `json:"created_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-}
-
 type Server struct {
-	db       *sql.DB
-	mu       sync.RWMutex
-	state    State
-	apiKey   string
-	hub      *Hub
-	workDir  string
-	allowExec bool
+	db     *sql.DB
+	mu     sync.RWMutex
+	state  State
+	apiKey string
+	hub    *Hub
 }
 
 type Hub struct {
@@ -164,15 +161,9 @@ func main() {
 	if dbPath == "" {
 		dbPath = "./data/bridge.db"
 	}
-	workDir := os.Getenv("WORKSPACE_DIR")
-	if workDir == "" {
-		workDir = "./workspace"
-	}
-	os.MkdirAll(workDir, 0755)
+	apiKey := os.Getenv("BRIDGE_API_KEY")
+
 	os.MkdirAll("./data", 0755)
-
-	allowExec := os.Getenv("ALLOW_EXEC") == "1" || os.Getenv("ALLOW_EXEC") == "true"
-
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatal(err)
@@ -185,10 +176,11 @@ func main() {
 	hub := newHub()
 	go hub.run()
 
-	s := &Server{db: db, apiKey: os.Getenv("BRIDGE_API_KEY"), hub: hub, workDir: workDir, allowExec: allowExec}
+	s := &Server{db: db, apiKey: apiKey, hub: hub}
 	s.state = State{
 		Roles: make(map[string]string), Goals: []string{}, Constraints: []string{},
-		OpenQuestions: []string{}, Decisions: []string{}, CurrentStatus: "idle", LastUpdated: time.Now().UTC(),
+		OpenQuestions: []string{}, Decisions: []string{}, CurrentStatus: "idle",
+		LastUpdated: time.Now().UTC(),
 	}
 	s.loadState()
 
@@ -206,7 +198,7 @@ func main() {
 	mux.HandleFunc("/api/v1/lock", withCORS(s.auth(s.handleLock)))
 	mux.HandleFunc("/api/v1/jobs", withCORS(s.auth(s.handleJobs)))
 
-	log.Printf("Multi-AI Bridge on :%s (exec allowed=%v)", port, allowExec)
+	log.Printf("Multi-AI Bridge listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
@@ -235,8 +227,9 @@ func initDB(db *sql.DB) error {
 			id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
 			content TEXT NOT NULL, created_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS jobs (
-			id TEXT PRIMARY KEY, project_id TEXT, kind TEXT NOT NULL, command TEXT NOT NULL,
-			status TEXT NOT NULL, log TEXT, created_at TEXT NOT NULL, finished_at TEXT);
+			id TEXT PRIMARY KEY, project_id TEXT, type TEXT NOT NULL, command TEXT NOT NULL,
+			status TEXT NOT NULL, output TEXT, created_by TEXT, created_at TEXT NOT NULL,
+			started_at TEXT, ended_at TEXT);
 	`)
 	return err
 }
@@ -252,9 +245,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "ok", "service": "multi-ai-bridge", "exec_enabled": s.allowExec,
-	})
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "multi-ai-bridge"})
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -271,18 +262,16 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Title, Description, Instructions, ProjectID string
-		Goals, Constraints                         []string
+		Goals, Constraints                          []string
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
 	s.mu.Lock()
-	s.state.TaskTitle = body.Title
-	s.state.TaskDescription = body.Description
+	s.state.TaskTitle, s.state.TaskDescription = body.Title, body.Description
 	s.state.Instructions = body.Instructions
-	s.state.Goals = body.Goals
-	s.state.Constraints = body.Constraints
+	s.state.Goals, s.state.Constraints = body.Goals, body.Constraints
 	if body.ProjectID != "" {
 		s.state.ProjectID = body.ProjectID
 	}
@@ -358,7 +347,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c Contribution
 		var ts, related, meta string
-		if err := rows.Scan(&c.ID, &ts, &c.AgentName, &c.Role, &c.Content, &c.ContributionType, &related, &meta); err != nil {
+		if rows.Scan(&c.ID, &ts, &c.AgentName, &c.Role, &c.Content, &c.ContributionType, &related, &meta) != nil {
 			continue
 		}
 		c.Timestamp, _ = time.Parse(time.RFC3339, ts)
@@ -378,13 +367,13 @@ func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct{ AgentName, Role string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), 400)
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		http.Error(w, "bad request", 400)
 		return
 	}
 	s.mu.Lock()
 	if s.state.Roles == nil {
-		s.state.Roles = make(map[string]string)
+		s.state.Roles = map[string]string{}
 	}
 	s.state.Roles[body.AgentName] = body.Role
 	s.state.LastUpdated = time.Now().UTC()
@@ -407,13 +396,19 @@ func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, _ := s.db.Query(`SELECT id, name, description, created_at FROM projects ORDER BY created_at DESC`)
+		rows, err := s.db.Query(`SELECT id, name, description, created_at FROM projects ORDER BY created_at DESC`)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
 		defer rows.Close()
 		var list []Project
 		for rows.Next() {
 			var p Project
 			var ts string
-			rows.Scan(&p.ID, &p.Name, &p.Description, &ts)
+			if rows.Scan(&p.ID, &p.Name, &p.Description, &ts) != nil {
+				continue
+			}
 			p.CreatedAt, _ = time.Parse(time.RFC3339, ts)
 			list = append(list, p)
 		}
@@ -421,11 +416,13 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
 		var body struct{ Name, Description string }
-		json.NewDecoder(r.Body).Decode(&body)
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
 		id := time.Now().Format("20060102150405")
 		ts := time.Now().UTC()
 		s.db.Exec(`INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)`, id, body.Name, body.Description, ts.Format(time.RFC3339))
-		os.MkdirAll(filepath.Join(s.workDir, id), 0755)
 		s.mu.Lock()
 		s.state.ProjectID = id
 		s.state.LastUpdated = ts
@@ -446,17 +443,24 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		pid := r.URL.Query().Get("project_id")
 		var rows *sql.Rows
+		var err error
 		if pid != "" {
-			rows, _ = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts WHERE project_id = ? ORDER BY created_at DESC`, pid)
+			rows, err = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts WHERE project_id = ? ORDER BY created_at DESC`, pid)
 		} else {
-			rows, _ = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts ORDER BY created_at DESC LIMIT 100`)
+			rows, err = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts ORDER BY created_at DESC LIMIT 100`)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
 		}
 		defer rows.Close()
 		var list []Artifact
 		for rows.Next() {
 			var a Artifact
 			var ts string
-			rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Kind, &a.Content, &ts)
+			if rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Kind, &a.Content, &ts) != nil {
+				continue
+			}
 			a.CreatedAt, _ = time.Parse(time.RFC3339, ts)
 			list = append(list, a)
 		}
@@ -464,7 +468,10 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
 		var body struct{ ProjectID, Name, Kind, Content string }
-		json.NewDecoder(r.Body).Decode(&body)
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
 		if body.Kind == "" {
 			body.Kind = "note"
 		}
@@ -472,12 +479,6 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 		ts := time.Now().UTC()
 		s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			id, body.ProjectID, body.Name, body.Kind, body.Content, ts.Format(time.RFC3339))
-		// also write to workspace if name looks like a relative path
-		if body.ProjectID != "" && body.Name != "" && !strings.Contains(body.Name, "..") {
-			p := filepath.Join(s.workDir, body.ProjectID, body.Name)
-			os.MkdirAll(filepath.Dir(p), 0755)
-			_ = os.WriteFile(p, []byte(body.Content), 0644)
-		}
 		a := Artifact{ID: id, ProjectID: body.ProjectID, Name: body.Name, Kind: body.Kind, Content: body.Content, CreatedAt: ts}
 		s.hub.publish("artifact", a)
 		w.Header().Set("Content-Type", "application/json")
@@ -493,14 +494,17 @@ func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct{ AgentName, Action string }
-	json.NewDecoder(r.Body).Decode(&body)
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch body.Action {
 	case "acquire":
 		if s.state.AgentLock != "" && s.state.AgentLock != body.AgentName {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(409)
+			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]string{"status": "busy", "held_by": s.state.AgentLock})
 			return
 		}
@@ -525,90 +529,63 @@ func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, _ := s.db.Query(`SELECT id, project_id, kind, command, status, log, created_at, finished_at FROM jobs ORDER BY created_at DESC LIMIT 50`)
+		rows, err := s.db.Query(`SELECT id, project_id, type, command, status, output, created_by, created_at, started_at, ended_at FROM jobs ORDER BY created_at DESC LIMIT 50`)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
 		defer rows.Close()
 		var list []Job
 		for rows.Next() {
 			var j Job
-			var ts, fin sql.NullString
-			rows.Scan(&j.ID, &j.ProjectID, &j.Kind, &j.Command, &j.Status, &j.Log, &ts, &fin)
-			if ts.Valid {
-				j.CreatedAt, _ = time.Parse(time.RFC3339, ts.String)
+			var ca, sa, ea sql.NullString
+			if rows.Scan(&j.ID, &j.ProjectID, &j.Type, &j.Command, &j.Status, &j.Output, &j.CreatedBy, &ca, &sa, &ea) != nil {
+				continue
 			}
-			if fin.Valid {
-				t, _ := time.Parse(time.RFC3339, fin.String)
-				j.FinishedAt = &t
+			if ca.Valid {
+				j.CreatedAt, _ = time.Parse(time.RFC3339, ca.String)
+			}
+			if sa.Valid {
+				t, _ := time.Parse(time.RFC3339, sa.String)
+				j.StartedAt = &t
+			}
+			if ea.Valid {
+				t, _ := time.Parse(time.RFC3339, ea.String)
+				j.EndedAt = &t
 			}
 			list = append(list, j)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
-		var body struct{ ProjectID, Kind, Command string }
-		json.NewDecoder(r.Body).Decode(&body)
-		if body.Kind == "" {
-			body.Kind = "custom"
+		var body struct {
+			ProjectID string `json:"project_id"`
+			Type      string `json:"type"`
+			Command   string `json:"command"`
+			CreatedBy string `json:"created_by"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		if body.Type == "" {
+			body.Type = "script"
 		}
 		if body.Command == "" {
 			http.Error(w, "command required", 400)
 			return
 		}
-		// safety: only allow when explicitly enabled
-		if !s.allowExec {
-			http.Error(w, "execution disabled. Set ALLOW_EXEC=true on the server", 403)
-			return
-		}
-		// block dangerous patterns
-		lower := strings.ToLower(body.Command)
-		for _, bad := range []string{"rm -rf /", "mkfs", ":(){", "shutdown", "reboot"} {
-			if strings.Contains(lower, bad) {
-				http.Error(w, "command blocked", 400)
-				return
-			}
-		}
 		id := time.Now().Format("20060102150405.000000000")
 		ts := time.Now().UTC()
-		s.db.Exec(`INSERT INTO jobs (id, project_id, kind, command, status, log, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			id, body.ProjectID, body.Kind, body.Command, "queued", "", ts.Format(time.RFC3339))
-		job := Job{ID: id, ProjectID: body.ProjectID, Kind: body.Kind, Command: body.Command, Status: "queued", CreatedAt: ts}
-		s.hub.publish("job", job)
-		go s.runJob(id, body.ProjectID, body.Command)
+		s.db.Exec(`INSERT INTO jobs (id, project_id, type, command, status, output, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, body.ProjectID, body.Type, body.Command, "queued", "", body.CreatedBy, ts.Format(time.RFC3339))
+		j := Job{ID: id, ProjectID: body.ProjectID, Type: body.Type, Command: body.Command, Status: "queued", CreatedBy: body.CreatedBy, CreatedAt: ts}
+		s.hub.publish("job", j)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(job)
+		json.NewEncoder(w).Encode(j)
 	default:
 		http.Error(w, "method not allowed", 405)
 	}
-}
-
-func (s *Server) runJob(id, projectID, command string) {
-	s.db.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, "running", id)
-	s.hub.publish("job", map[string]string{"id": id, "status": "running"})
-
-	dir := s.workDir
-	if projectID != "" {
-		dir = filepath.Join(s.workDir, projectID)
-		os.MkdirAll(dir, 0755)
-	}
-
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	status := "succeeded"
-	logText := string(out)
-	if err != nil {
-		status = "failed"
-		logText = logText + "\n" + err.Error()
-	}
-	if len(logText) > 100000 {
-		logText = logText[:100000] + "\n...truncated"
-	}
-	fin := time.Now().UTC()
-	s.db.Exec(`UPDATE jobs SET status = ?, log = ?, finished_at = ? WHERE id = ?`, status, logText, fin.Format(time.RFC3339), id)
-	// store log as artifact
-	artID := time.Now().Format("20060102150405.000000000")
-	s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		artID, projectID, "job-"+id+".log", "log", logText, fin.Format(time.RFC3339))
-	s.hub.publish("job", map[string]interface{}{"id": id, "status": status, "log": logText})
 }
 
 func (s *Server) saveState() {
@@ -621,7 +598,7 @@ func (s *Server) loadState() {
 	if s.db.QueryRow(`SELECT data FROM state WHERE id = 1`).Scan(&data) == nil {
 		json.Unmarshal([]byte(data), &s.state)
 		if s.state.Roles == nil {
-			s.state.Roles = make(map[string]string)
+			s.state.Roles = map[string]string{}
 		}
 	}
 }
