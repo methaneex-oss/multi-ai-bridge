@@ -6,6 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,7 +27,7 @@ type State struct {
 	OpenQuestions   []string          `json:"open_questions"`
 	Decisions       []string          `json:"decisions"`
 	CurrentStatus   string            `json:"current_status"`
-	AgentLock       string            `json:"agent_lock"` // agent id holding the turn, or ""
+	AgentLock       string            `json:"agent_lock"`
 	LastUpdated     time.Time         `json:"last_updated"`
 	Version         int               `json:"version"`
 }
@@ -40,7 +43,7 @@ type Artifact struct {
 	ID        string    `json:"id"`
 	ProjectID string    `json:"project_id"`
 	Name      string    `json:"name"`
-	Kind      string    `json:"kind"` // file, note, link, spec
+	Kind      string    `json:"kind"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -56,12 +59,25 @@ type Contribution struct {
 	Metadata         map[string]interface{} `json:"metadata"`
 }
 
+type Job struct {
+	ID        string    `json:"id"`
+	ProjectID string    `json:"project_id"`
+	Kind      string    `json:"kind"` // build | test | run | custom
+	Command   string    `json:"command"`
+	Status    string    `json:"status"` // queued | running | succeeded | failed
+	Log       string    `json:"log"`
+	CreatedAt time.Time `json:"created_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
 type Server struct {
-	db     *sql.DB
-	mu     sync.RWMutex
-	state  State
-	apiKey string
-	hub    *Hub
+	db       *sql.DB
+	mu       sync.RWMutex
+	state    State
+	apiKey   string
+	hub      *Hub
+	workDir  string
+	allowExec bool
 }
 
 type Hub struct {
@@ -148,9 +164,15 @@ func main() {
 	if dbPath == "" {
 		dbPath = "./data/bridge.db"
 	}
-	apiKey := os.Getenv("BRIDGE_API_KEY")
-
+	workDir := os.Getenv("WORKSPACE_DIR")
+	if workDir == "" {
+		workDir = "./workspace"
+	}
+	os.MkdirAll(workDir, 0755)
 	os.MkdirAll("./data", 0755)
+
+	allowExec := os.Getenv("ALLOW_EXEC") == "1" || os.Getenv("ALLOW_EXEC") == "true"
+
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatal(err)
@@ -163,15 +185,10 @@ func main() {
 	hub := newHub()
 	go hub.run()
 
-	s := &Server{db: db, apiKey: apiKey, hub: hub}
+	s := &Server{db: db, apiKey: os.Getenv("BRIDGE_API_KEY"), hub: hub, workDir: workDir, allowExec: allowExec}
 	s.state = State{
-		Roles:         make(map[string]string),
-		Goals:         []string{},
-		Constraints:   []string{},
-		OpenQuestions: []string{},
-		Decisions:     []string{},
-		CurrentStatus: "idle",
-		LastUpdated:   time.Now().UTC(),
+		Roles: make(map[string]string), Goals: []string{}, Constraints: []string{},
+		OpenQuestions: []string{}, Decisions: []string{}, CurrentStatus: "idle", LastUpdated: time.Now().UTC(),
 	}
 	s.loadState()
 
@@ -187,8 +204,9 @@ func main() {
 	mux.HandleFunc("/api/v1/projects", withCORS(s.auth(s.handleProjects)))
 	mux.HandleFunc("/api/v1/artifacts", withCORS(s.auth(s.handleArtifacts)))
 	mux.HandleFunc("/api/v1/lock", withCORS(s.auth(s.handleLock)))
+	mux.HandleFunc("/api/v1/jobs", withCORS(s.auth(s.handleJobs)))
 
-	log.Printf("Multi-AI Bridge listening on :%s", port)
+	log.Printf("Multi-AI Bridge on :%s (exec allowed=%v)", port, allowExec)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
@@ -207,34 +225,18 @@ func withCORS(next http.HandlerFunc) http.HandlerFunc {
 
 func initDB(db *sql.DB) error {
 	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS state (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			data TEXT NOT NULL
-		);
+		CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS contributions (
-			id TEXT PRIMARY KEY,
-			timestamp TEXT NOT NULL,
-			agent_name TEXT NOT NULL,
-			role TEXT NOT NULL,
-			content TEXT NOT NULL,
-			contribution_type TEXT NOT NULL,
-			related_to TEXT,
-			metadata TEXT
-		);
+			id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, agent_name TEXT NOT NULL, role TEXT NOT NULL,
+			content TEXT NOT NULL, contribution_type TEXT NOT NULL, related_to TEXT, metadata TEXT);
 		CREATE TABLE IF NOT EXISTS projects (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL,
-			description TEXT,
-			created_at TEXT NOT NULL
-		);
+			id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS artifacts (
-			id TEXT PRIMARY KEY,
-			project_id TEXT NOT NULL,
-			name TEXT NOT NULL,
-			kind TEXT NOT NULL,
-			content TEXT NOT NULL,
-			created_at TEXT NOT NULL
-		);
+			id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+			content TEXT NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS jobs (
+			id TEXT PRIMARY KEY, project_id TEXT, kind TEXT NOT NULL, command TEXT NOT NULL,
+			status TEXT NOT NULL, log TEXT, created_at TEXT NOT NULL, finished_at TEXT);
 	`)
 	return err
 }
@@ -250,7 +252,9 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "multi-ai-bridge"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok", "service": "multi-ai-bridge", "exec_enabled": s.allowExec,
+	})
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -262,19 +266,15 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", 405)
 		return
 	}
 	var body struct {
-		Title        string   `json:"title"`
-		Description  string   `json:"description"`
-		Instructions string   `json:"instructions"`
-		Goals        []string `json:"goals"`
-		Constraints  []string `json:"constraints"`
-		ProjectID    string   `json:"project_id"`
+		Title, Description, Instructions, ProjectID string
+		Goals, Constraints                         []string
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), 400)
 		return
 	}
 	s.mu.Lock()
@@ -299,19 +299,16 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", 405)
 		return
 	}
 	var body struct {
-		AgentName        string                 `json:"agent_name"`
-		Role             string                 `json:"role"`
-		Content          string                 `json:"content"`
-		ContributionType string                 `json:"contribution_type"`
-		RelatedTo        *string                `json:"related_to"`
-		Metadata         map[string]interface{} `json:"metadata"`
+		AgentName, Role, Content, ContributionType string
+		RelatedTo                                  *string
+		Metadata                                   map[string]interface{}
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), 400)
 		return
 	}
 	id := time.Now().Format("20060102150405.000000000")
@@ -321,13 +318,10 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 		related = *body.RelatedTo
 	}
 	ts := time.Now().UTC()
-	_, err := s.db.Exec(
-		`INSERT INTO contributions (id, timestamp, agent_name, role, content, contribution_type, related_to, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, ts.Format(time.RFC3339), body.AgentName, body.Role, body.Content, body.ContributionType, related, string(meta),
-	)
+	_, err := s.db.Exec(`INSERT INTO contributions (id, timestamp, agent_name, role, content, contribution_type, related_to, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, ts.Format(time.RFC3339), body.AgentName, body.Role, body.Content, body.ContributionType, related, string(meta))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 	s.mu.Lock()
@@ -340,19 +334,13 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 	if body.ContributionType == "decision" {
 		s.state.Decisions = append(s.state.Decisions, body.Content)
 	}
-	// release lock if this agent held it
 	if s.state.AgentLock == body.AgentName {
 		s.state.AgentLock = ""
 	}
 	st := s.state
 	s.saveState()
 	s.mu.Unlock()
-
-	contrib := Contribution{
-		ID: id, Timestamp: ts, AgentName: body.AgentName, Role: body.Role,
-		Content: body.Content, ContributionType: body.ContributionType,
-		RelatedTo: body.RelatedTo, Metadata: body.Metadata,
-	}
+	contrib := Contribution{ID: id, Timestamp: ts, AgentName: body.AgentName, Role: body.Role, Content: body.Content, ContributionType: body.ContributionType, RelatedTo: body.RelatedTo, Metadata: body.Metadata}
 	s.hub.publish("contribution", contrib)
 	s.hub.publish("state", st)
 	w.Header().Set("Content-Type", "application/json")
@@ -360,10 +348,9 @@ func (s *Server) handleContribute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT id, timestamp, agent_name, role, content, contribution_type, related_to, metadata
-		FROM contributions ORDER BY timestamp DESC LIMIT 50`)
+	rows, err := s.db.Query(`SELECT id, timestamp, agent_name, role, content, contribution_type, related_to, metadata FROM contributions ORDER BY timestamp DESC LIMIT 50`)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -387,15 +374,12 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRole(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", 405)
 		return
 	}
-	var body struct {
-		AgentName string `json:"agent_name"`
-		Role      string `json:"role"`
-	}
+	var body struct{ AgentName, Role string }
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), 400)
 		return
 	}
 	s.mu.Lock()
@@ -423,41 +407,25 @@ func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := s.db.Query(`SELECT id, name, description, created_at FROM projects ORDER BY created_at DESC`)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
+		rows, _ := s.db.Query(`SELECT id, name, description, created_at FROM projects ORDER BY created_at DESC`)
 		defer rows.Close()
 		var list []Project
 		for rows.Next() {
 			var p Project
 			var ts string
-			if err := rows.Scan(&p.ID, &p.Name, &p.Description, &ts); err != nil {
-				continue
-			}
+			rows.Scan(&p.ID, &p.Name, &p.Description, &ts)
 			p.CreatedAt, _ = time.Parse(time.RFC3339, ts)
 			list = append(list, p)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
-		var body struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
+		var body struct{ Name, Description string }
+		json.NewDecoder(r.Body).Decode(&body)
 		id := time.Now().Format("20060102150405")
 		ts := time.Now().UTC()
-		_, err := s.db.Exec(`INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)`,
-			id, body.Name, body.Description, ts.Format(time.RFC3339))
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
+		s.db.Exec(`INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)`, id, body.Name, body.Description, ts.Format(time.RFC3339))
+		os.MkdirAll(filepath.Join(s.workDir, id), 0755)
 		s.mu.Lock()
 		s.state.ProjectID = id
 		s.state.LastUpdated = ts
@@ -478,50 +446,37 @@ func (s *Server) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		pid := r.URL.Query().Get("project_id")
 		var rows *sql.Rows
-		var err error
 		if pid != "" {
-			rows, err = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts WHERE project_id = ? ORDER BY created_at DESC`, pid)
+			rows, _ = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts WHERE project_id = ? ORDER BY created_at DESC`, pid)
 		} else {
-			rows, err = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts ORDER BY created_at DESC LIMIT 100`)
-		}
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+			rows, _ = s.db.Query(`SELECT id, project_id, name, kind, content, created_at FROM artifacts ORDER BY created_at DESC LIMIT 100`)
 		}
 		defer rows.Close()
 		var list []Artifact
 		for rows.Next() {
 			var a Artifact
 			var ts string
-			if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Kind, &a.Content, &ts); err != nil {
-				continue
-			}
+			rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Kind, &a.Content, &ts)
 			a.CreatedAt, _ = time.Parse(time.RFC3339, ts)
 			list = append(list, a)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
-		var body struct {
-			ProjectID string `json:"project_id"`
-			Name      string `json:"name"`
-			Kind      string `json:"kind"`
-			Content   string `json:"content"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
+		var body struct{ ProjectID, Name, Kind, Content string }
+		json.NewDecoder(r.Body).Decode(&body)
 		if body.Kind == "" {
 			body.Kind = "note"
 		}
 		id := time.Now().Format("20060102150405.000000000")
 		ts := time.Now().UTC()
-		_, err := s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			id, body.ProjectID, body.Name, body.Kind, body.Content, ts.Format(time.RFC3339))
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+		// also write to workspace if name looks like a relative path
+		if body.ProjectID != "" && body.Name != "" && !strings.Contains(body.Name, "..") {
+			p := filepath.Join(s.workDir, body.ProjectID, body.Name)
+			os.MkdirAll(filepath.Dir(p), 0755)
+			_ = os.WriteFile(p, []byte(body.Content), 0644)
 		}
 		a := Artifact{ID: id, ProjectID: body.ProjectID, Name: body.Name, Kind: body.Kind, Content: body.Content, CreatedAt: ts}
 		s.hub.publish("artifact", a)
@@ -537,21 +492,15 @@ func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	var body struct {
-		AgentName string `json:"agent_name"`
-		Action    string `json:"action"` // acquire | release
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
+	var body struct{ AgentName, Action string }
+	json.NewDecoder(r.Body).Decode(&body)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch body.Action {
 	case "acquire":
 		if s.state.AgentLock != "" && s.state.AgentLock != body.AgentName {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
+			w.WriteHeader(409)
 			json.NewEncoder(w).Encode(map[string]string{"status": "busy", "held_by": s.state.AgentLock})
 			return
 		}
@@ -573,6 +522,95 @@ func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(st)
 }
 
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		rows, _ := s.db.Query(`SELECT id, project_id, kind, command, status, log, created_at, finished_at FROM jobs ORDER BY created_at DESC LIMIT 50`)
+		defer rows.Close()
+		var list []Job
+		for rows.Next() {
+			var j Job
+			var ts, fin sql.NullString
+			rows.Scan(&j.ID, &j.ProjectID, &j.Kind, &j.Command, &j.Status, &j.Log, &ts, &fin)
+			if ts.Valid {
+				j.CreatedAt, _ = time.Parse(time.RFC3339, ts.String)
+			}
+			if fin.Valid {
+				t, _ := time.Parse(time.RFC3339, fin.String)
+				j.FinishedAt = &t
+			}
+			list = append(list, j)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(list)
+	case http.MethodPost:
+		var body struct{ ProjectID, Kind, Command string }
+		json.NewDecoder(r.Body).Decode(&body)
+		if body.Kind == "" {
+			body.Kind = "custom"
+		}
+		if body.Command == "" {
+			http.Error(w, "command required", 400)
+			return
+		}
+		// safety: only allow when explicitly enabled
+		if !s.allowExec {
+			http.Error(w, "execution disabled. Set ALLOW_EXEC=true on the server", 403)
+			return
+		}
+		// block dangerous patterns
+		lower := strings.ToLower(body.Command)
+		for _, bad := range []string{"rm -rf /", "mkfs", ":(){", "shutdown", "reboot"} {
+			if strings.Contains(lower, bad) {
+				http.Error(w, "command blocked", 400)
+				return
+			}
+		}
+		id := time.Now().Format("20060102150405.000000000")
+		ts := time.Now().UTC()
+		s.db.Exec(`INSERT INTO jobs (id, project_id, kind, command, status, log, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			id, body.ProjectID, body.Kind, body.Command, "queued", "", ts.Format(time.RFC3339))
+		job := Job{ID: id, ProjectID: body.ProjectID, Kind: body.Kind, Command: body.Command, Status: "queued", CreatedAt: ts}
+		s.hub.publish("job", job)
+		go s.runJob(id, body.ProjectID, body.Command)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(job)
+	default:
+		http.Error(w, "method not allowed", 405)
+	}
+}
+
+func (s *Server) runJob(id, projectID, command string) {
+	s.db.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, "running", id)
+	s.hub.publish("job", map[string]string{"id": id, "status": "running"})
+
+	dir := s.workDir
+	if projectID != "" {
+		dir = filepath.Join(s.workDir, projectID)
+		os.MkdirAll(dir, 0755)
+	}
+
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	status := "succeeded"
+	logText := string(out)
+	if err != nil {
+		status = "failed"
+		logText = logText + "\n" + err.Error()
+	}
+	if len(logText) > 100000 {
+		logText = logText[:100000] + "\n...truncated"
+	}
+	fin := time.Now().UTC()
+	s.db.Exec(`UPDATE jobs SET status = ?, log = ?, finished_at = ? WHERE id = ?`, status, logText, fin.Format(time.RFC3339), id)
+	// store log as artifact
+	artID := time.Now().Format("20060102150405.000000000")
+	s.db.Exec(`INSERT INTO artifacts (id, project_id, name, kind, content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		artID, projectID, "job-"+id+".log", "log", logText, fin.Format(time.RFC3339))
+	s.hub.publish("job", map[string]interface{}{"id": id, "status": status, "log": logText})
+}
+
 func (s *Server) saveState() {
 	data, _ := json.Marshal(s.state)
 	s.db.Exec(`INSERT OR REPLACE INTO state (id, data) VALUES (1, ?)`, string(data))
@@ -580,8 +618,7 @@ func (s *Server) saveState() {
 
 func (s *Server) loadState() {
 	var data string
-	err := s.db.QueryRow(`SELECT data FROM state WHERE id = 1`).Scan(&data)
-	if err == nil {
+	if s.db.QueryRow(`SELECT data FROM state WHERE id = 1`).Scan(&data) == nil {
 		json.Unmarshal([]byte(data), &s.state)
 		if s.state.Roles == nil {
 			s.state.Roles = make(map[string]string)
