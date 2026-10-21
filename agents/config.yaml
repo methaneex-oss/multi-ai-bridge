@@ -1,5 +1,4 @@
-# Flexible agent definitions.
-# Change models freely. Use OpenRouter model IDs when OPENROUTER_API_KEY is set.
+# Flexible agent definitions — change models freely (OpenRouter ids recommended)
 
 agents:
   - id: architect
@@ -7,7 +6,7 @@ agents:
     model: anthropic/claude-sonnet-4
     temperature: 0.3
     system_extra: |
-      You own high-level design, contracts, and integration rules.
+      Own high-level design, contracts, and integration rules.
       Prefer clear ADRs and vertical-slice thinking.
 
   - id: coder
@@ -15,20 +14,28 @@ agents:
     model: deepseek/deepseek-chat
     temperature: 0.2
     system_extra: |
-      You implement working code and tests for the current vertical slice.
-      Keep changes small, reviewable, and tied to the shared state.
+      Implement working code and tests for the current vertical slice.
+      Keep changes small and tied to shared state / artifacts.
+
+  - id: builder
+    role: Builder
+    model: openai/gpt-4o-mini
+    temperature: 0.2
+    system_extra: |
+      Propose exact build commands (npm, go build, cargo, make).
+      When ready, ask for a job via clear command lines the worker allowlist accepts.
+
+  - id: tester
+    role: Tester
+    model: openai/gpt-4o-mini
+    temperature: 0.2
+    system_extra: |
+      Propose and interpret tests. Prefer pytest, go test, npm test.
+      Report failures clearly and suggest minimal fixes.
 
   - id: reviewer
     role: Reviewer
-    model: openai/gpt-4o
+    model: anthropic/claude-sonnet-4
     temperature: 0.2
     system_extra: |
-      You critique plans and code for integration gaps, missing tests,
-      and violations of project instructions.
-
-  - id: researcher
-    role: Researcher
-    model: google/gemini-2.0-flash
-    temperature: 0.4
-    system_extra: |
-      You gather evidence, compare approaches, and surface open questions.
+      Critique plans and code for integration gaps and missing tests.

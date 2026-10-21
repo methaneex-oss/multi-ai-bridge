@@ -64,10 +64,7 @@ class BridgeClient:
         return r.json()
 
     def assign_role(self, agent_name: str, role: str) -> Dict[str, Any]:
-        r = self.session.post(
-            f"{self.base_url}/api/v1/role",
-            json={"agent_name": agent_name, "role": role},
-        )
+        r = self.session.post(f"{self.base_url}/api/v1/role", json={"agent_name": agent_name, "role": role})
         r.raise_for_status()
         return r.json()
 
@@ -82,10 +79,7 @@ class BridgeClient:
         return r.json()
 
     def create_project(self, name: str, description: str = "") -> Dict[str, Any]:
-        r = self.session.post(
-            f"{self.base_url}/api/v1/projects",
-            json={"name": name, "description": description},
-        )
+        r = self.session.post(f"{self.base_url}/api/v1/projects", json={"name": name, "description": description})
         r.raise_for_status()
         return r.json()
 
@@ -94,13 +88,7 @@ class BridgeClient:
         r.raise_for_status()
         return r.json()
 
-    def add_artifact(
-        self,
-        name: str,
-        content: str,
-        kind: str = "note",
-        project_id: str = "",
-    ) -> Dict[str, Any]:
+    def add_artifact(self, name: str, content: str, kind: str = "note", project_id: str = "") -> Dict[str, Any]:
         r = self.session.post(
             f"{self.base_url}/api/v1/artifacts",
             json={"name": name, "content": content, "kind": kind, "project_id": project_id},
@@ -115,19 +103,32 @@ class BridgeClient:
         return r.json()
 
     def acquire_lock(self, agent_name: str) -> Dict[str, Any]:
-        r = self.session.post(
-            f"{self.base_url}/api/v1/lock",
-            json={"agent_name": agent_name, "action": "acquire"},
-        )
+        r = self.session.post(f"{self.base_url}/api/v1/lock", json={"agent_name": agent_name, "action": "acquire"})
         if r.status_code == 409:
             return r.json()
         r.raise_for_status()
         return r.json()
 
     def release_lock(self, agent_name: str) -> Dict[str, Any]:
+        r = self.session.post(f"{self.base_url}/api/v1/lock", json={"agent_name": agent_name, "action": "release"})
+        r.raise_for_status()
+        return r.json()
+
+    def create_job(
+        self,
+        command: str,
+        job_type: str = "script",
+        project_id: str = "",
+        created_by: str = "human",
+    ) -> Dict[str, Any]:
         r = self.session.post(
-            f"{self.base_url}/api/v1/lock",
-            json={"agent_name": agent_name, "action": "release"},
+            f"{self.base_url}/api/v1/jobs",
+            json={"command": command, "type": job_type, "project_id": project_id, "created_by": created_by},
         )
+        r.raise_for_status()
+        return r.json()
+
+    def list_jobs(self) -> List[Dict[str, Any]]:
+        r = self.session.get(f"{self.base_url}/api/v1/jobs")
         r.raise_for_status()
         return r.json()
