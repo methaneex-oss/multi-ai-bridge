@@ -1,75 +1,64 @@
-"""
-Provider-agnostic LLM caller.
-Prefers OpenRouter. Falls back to direct provider bases when keys exist.
-"""
+"""Provider-agnostic LLM caller. OpenRouter-first; works with any OpenAI-compatible API."""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import httpx
 
-OPENROUTER_BASE = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
-
-def _headers_for(model: str) -> tuple[str, Dict[str, str]]:
-    """Return (base_url, headers) for the given model id."""
-    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if openrouter_key:
-        return OPENROUTER_BASE, {
-            "Authorization": f"Bearer {openrouter_key}",
+def _resolve() -> tuple[str, Dict[str, str], str]:
+    """Return (base_url, headers, default_model_prefix_hint)."""
+    or_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if or_key:
+        base = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        return base, {
+            "Authorization": f"Bearer {or_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/methaneex-oss/multi-ai-bridge",
             "X-Title": "Multi-AI Bridge",
-        }
+        }, "openrouter"
 
-    # Direct-provider fallbacks (only if no OpenRouter key)
-    if model.startswith("openai/") or model.startswith("gpt-"):
-        key = os.getenv("OPENAI_API_KEY", "").strip()
-        if not key:
-            raise RuntimeError("No OPENROUTER_API_KEY or OPENAI_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if openai_key:
         return "https://api.openai.com/v1", {
-            "Authorization": f"Bearer {key}",
+            "Authorization": f"Bearer {openai_key}",
             "Content-Type": "application/json",
-        }
+        }, "openai"
 
-    if model.startswith("anthropic/") or model.startswith("claude"):
-        key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-        if not key:
-            raise RuntimeError("No OPENROUTER_API_KEY or ANTHROPIC_API_KEY")
-        # Anthropic has a different API shape; for simplicity we still expect
-        # OpenRouter when using Claude unless you extend this branch.
-        raise RuntimeError(
-            "Direct Anthropic calls need the messages API. "
-            "Use OPENROUTER_API_KEY for Claude models."
-        )
+    deepseek = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if deepseek:
+        return "https://api.deepseek.com/v1", {
+            "Authorization": f"Bearer {deepseek}",
+            "Content-Type": "application/json",
+        }, "deepseek"
 
-    if model.startswith("google/") or model.startswith("gemini"):
-        key = os.getenv("GOOGLE_API_KEY", "").strip()
-        if not key:
-            raise RuntimeError("No OPENROUTER_API_KEY or GOOGLE_API_KEY")
-        raise RuntimeError(
-            "Direct Google calls need a different client. "
-            "Use OPENROUTER_API_KEY for Gemini models."
-        )
-
-    # Generic OpenAI-compatible endpoint (DeepSeek, xAI, local, etc.)
-    for env_name, base in [
-        ("DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"),
-        ("XAI_API_KEY", "https://api.x.ai/v1"),
-    ]:
-        key = os.getenv(env_name, "").strip()
-        if key:
-            return base, {
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            }
+    xai = os.getenv("XAI_API_KEY", "").strip()
+    if xai:
+        return "https://api.x.ai/v1", {
+            "Authorization": f"Bearer {xai}",
+            "Content-Type": "application/json",
+        }, "xai"
 
     raise RuntimeError(
-        "No usable API key found. Set OPENROUTER_API_KEY (recommended) "
-        "or a direct provider key in .env"
+        "No API key found. Set OPENROUTER_API_KEY (recommended) or OPENAI_API_KEY / "
+        "DEEPSEEK_API_KEY / XAI_API_KEY in the environment."
     )
+
+
+def normalize_model(model: str, provider_hint: str) -> str:
+    """Strip provider prefixes when calling direct OpenAI-compatible endpoints."""
+    if provider_hint == "openrouter":
+        return model
+    # direct OpenAI: openai/gpt-4o -> gpt-4o
+    if model.startswith("openai/"):
+        return model.split("/", 1)[1]
+    if model.startswith("deepseek/"):
+        return model.split("/", 1)[1]
+    if model.startswith("x-ai/") or model.startswith("xai/"):
+        return model.split("/", 1)[1]
+    return model
 
 
 def chat(
@@ -78,11 +67,11 @@ def chat(
     temperature: float = 0.3,
     max_tokens: int = 4096,
 ) -> str:
-    base, headers = _headers_for(model)
+    base, headers, hint = _resolve()
+    model_id = normalize_model(model, hint)
 
-    # OpenRouter and OpenAI-compatible expect the model id as-is
     payload: Dict[str, Any] = {
-        "model": model,
+        "model": model_id,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -90,7 +79,11 @@ def chat(
 
     with httpx.Client(timeout=120.0) as client:
         r = client.post(f"{base}/chat/completions", headers=headers, json=payload)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:800]}")
         data = r.json()
 
-    return data["choices"][0]["message"]["content"]
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise RuntimeError(f"Unexpected LLM response shape: {data!r}") from e
