@@ -22,18 +22,13 @@ type Contribution = {
   contribution_type: string;
 };
 
-type ModelInfo = {
-  id: string;
-  name?: string;
-  tags?: string[];
-  context?: number | null;
-};
+type ModelInfo = { id: string; name?: string; tags?: string[] };
 
 type Provider = {
   id: string;
   name: string;
   base_url: string;
-  model: string; // default model when catalog not loaded
+  model: string;
   api_key: string;
   enabled: boolean;
   models?: ModelInfo[];
@@ -60,6 +55,7 @@ export default function Home() {
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [running, setRunning] = useState(false);
+  const [runMode, setRunMode] = useState<"sequential" | "parallel">("sequential");
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -80,7 +76,7 @@ export default function Home() {
       const a = localStorage.getItem(LS_A);
       if (p) setProviders(JSON.parse(p));
       if (a) setAgents(JSON.parse(a));
-    } catch { /* */ }
+    } catch { /* ignore corrupt storage */ }
   }, []);
 
   useEffect(() => {
@@ -97,7 +93,10 @@ export default function Home() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, h] = await Promise.all([fetch(api("api/v1/state")), fetch(api("api/v1/history"))]);
+      const [s, h] = await Promise.all([
+        fetch(api("api/v1/state")),
+        fetch(api("api/v1/history")),
+      ]);
       if (!s.ok) {
         const t = await s.text();
         let d = t;
@@ -105,7 +104,7 @@ export default function Home() {
           const j = JSON.parse(t);
           d = j.detail || j.error || t;
         } catch { /* */ }
-        throw new Error(d);
+        throw new Error(d || `HTTP ${s.status}`);
       }
       setState(await s.json());
       if (h.ok) {
@@ -140,7 +139,8 @@ export default function Home() {
           constraints: [],
         }),
       });
-      if (!res.ok) throw new Error(await res.text());
+      const text = await res.text();
+      if (!res.ok) throw new Error(text.slice(0, 200));
       setMsg("Task published");
       await refresh();
     } catch (e: any) {
@@ -151,6 +151,10 @@ export default function Home() {
   }
 
   async function testProvider(p: Provider) {
+    if (!p.api_key) {
+      setMsg("Add an API key before Test");
+      return;
+    }
     setTesting(p.id);
     try {
       const res = await fetch("/api/test-provider", {
@@ -166,13 +170,19 @@ export default function Home() {
       setProviders((prev) =>
         prev.map((x) =>
           x.id === p.id
-            ? { ...x, last_ok: !!data.ok, last_test: data.ok ? "Works: ready" : String(data.error || "failed") }
+            ? {
+                ...x,
+                last_ok: !!data.ok,
+                last_test: data.ok ? "Works: ready" : String(data.error || "failed"),
+              }
             : x
         )
       );
     } catch (e: any) {
       setProviders((prev) =>
-        prev.map((x) => (x.id === p.id ? { ...x, last_ok: false, last_test: e.message } : x))
+        prev.map((x) =>
+          x.id === p.id ? { ...x, last_ok: false, last_test: e.message } : x
+        )
       );
     } finally {
       setTesting(null);
@@ -180,6 +190,10 @@ export default function Home() {
   }
 
   async function loadModels(p: Provider) {
+    if (!p.api_key) {
+      setMsg("Add an API key before loading models");
+      return;
+    }
     setLoadingModels(p.id);
     setBrowseFor(p.id);
     setModelFilter("");
@@ -204,15 +218,18 @@ export default function Home() {
   }
 
   function saveProvider() {
-    if (!form.name || !form.base_url) return;
+    if (!form.name.trim() || !form.base_url.trim()) {
+      setMsg("Name and base URL required");
+      return;
+    }
     const id = form.name.toLowerCase().replace(/\s+/g, "-");
     setProviders((prev) => {
       const existing = prev.find((p) => p.id === id);
       const next: Provider = {
         id,
-        name: form.name,
-        base_url: form.base_url,
-        model: form.model || existing?.model || "",
+        name: form.name.trim(),
+        base_url: form.base_url.trim(),
+        model: form.model.trim() || existing?.model || "",
         api_key: form.api_key || existing?.api_key || "",
         enabled: existing?.enabled ?? true,
         models: existing?.models,
@@ -242,34 +259,40 @@ export default function Home() {
           ? [{ id: p.model, tags: ["general"] }]
           : [],
     }));
-    const next = autoAssignAgents(agents, provInfos, ctx || "general project");
-    setAgents(next);
-    setMsg("Auto-assigned agents from role + project context");
+    setAgents(autoAssignAgents(agents, provInfos, ctx || "general project"));
+    setMsg("Auto-assigned from role + project context");
   }
 
   async function runAgents() {
     setRunning(true);
     setMsg(null);
+    setError(null);
     try {
       const res = await fetch("/api/run-agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          mode: runMode,
+          auto_assign: true,
           providers: providers.map((p) => ({
             id: p.id,
             name: p.name,
             enabled: p.enabled,
             api_key: p.api_key,
             base_url: p.base_url,
-            models: p.models?.length ? p.models : p.model ? [{ id: p.model, tags: ["general"] }] : [],
+            models: p.models?.length
+              ? p.models
+              : p.model
+                ? [{ id: p.model, tags: ["general"] }]
+                : [],
           })),
           agents,
-          auto_assign: true,
         }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Run failed");
-      if (data.assignments) {
+      if (!res.ok) throw new Error(data.error || `Run failed (${res.status})`);
+
+      if (Array.isArray(data.assignments)) {
         setAgents((prev) =>
           prev.map((a) => {
             const m = data.assignments.find((x: any) => x.id === a.id);
@@ -277,17 +300,18 @@ export default function Home() {
           })
         );
       }
+
       const ok = (data.results || []).filter((r: any) => r.ok).length;
       const bad = (data.results || []).filter((r: any) => !r.ok);
       setMsg(
-        `Run: ${ok} ok` +
-          (bad.length ? ` · ${bad.length} failed (${bad[0]?.agent}: ${bad[0]?.detail || ""})` : "")
+        `${data.mode || runMode}: ${ok} ok` +
+          (bad.length ? ` · ${bad.length} failed — ${bad[0]?.agent}: ${String(bad[0]?.detail || "").slice(0, 80)}` : "")
       );
       if (data.state) setState(data.state);
-      if (data.history) setHistory(data.history);
+      if (Array.isArray(data.history)) setHistory(data.history);
       else await refresh();
     } catch (e: any) {
-      setError(e.message);
+      setError(e.message || "Run failed");
     } finally {
       setRunning(false);
     }
@@ -313,13 +337,13 @@ export default function Home() {
       <header style={{ marginBottom: 12 }}>
         <h1 style={{ margin: 0, fontSize: 20 }}>Multi-AI Bridge</h1>
         <p style={{ margin: "4px 0 0", color: "#9aa0a6", fontSize: 12 }}>
-          Multi-provider · Assign agents · Auto-route by context
+          Assign · Auto-route · Sequential or parallel runs
         </p>
       </header>
 
       <nav style={nav}>
         {tabs.map((t) => (
-          <button key={t.id} style={tab === t.id ? tabOn : tabOff} onClick={() => setTab(t.id)}>
+          <button key={t.id} type="button" style={tab === t.id ? tabOn : tabOff} onClick={() => setTab(t.id)}>
             {t.label}
           </button>
         ))}
@@ -328,7 +352,7 @@ export default function Home() {
       {error && (
         <div style={errBox}>
           {error}
-          <button style={{ ...btn, marginTop: 8, background: "#4b5563" }} onClick={() => refresh()}>
+          <button type="button" style={{ ...btn, marginTop: 8, background: "#4b5563" }} onClick={() => refresh()}>
             Retry
           </button>
         </div>
@@ -338,12 +362,35 @@ export default function Home() {
       {tab === "overview" && (
         <>
           <section style={card}>
-            <button style={{ ...btn, background: running ? "#374151" : "#10b981" }} disabled={running} onClick={runAgents}>
-              {running ? "Running agents…" : "▶ Run agents"}
-            </button>
-            <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 10 }}>
-              Uses agent assignments. Unassigned agents are auto-matched to models by role + task context.
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <button
+                type="button"
+                style={runMode === "sequential" ? tabOn : tabOff}
+                onClick={() => setRunMode("sequential")}
+              >
+                Sequential
+              </button>
+              <button
+                type="button"
+                style={runMode === "parallel" ? tabOn : tabOff}
+                onClick={() => setRunMode("parallel")}
+              >
+                Parallel
+              </button>
+            </div>
+            <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 0, marginBottom: 12 }}>
+              {runMode === "sequential"
+                ? "One after another — later agents can see earlier posts."
+                : "All agents call models at once — faster; same snapshot for all."}
             </p>
+            <button
+              type="button"
+              style={{ ...btn, background: running ? "#374151" : "#10b981" }}
+              disabled={running}
+              onClick={runAgents}
+            >
+              {running ? "Running…" : "▶ Run agents"}
+            </button>
           </section>
           <section style={{ ...card, marginTop: 12 }}>
             <h2 style={h2}>Task</h2>
@@ -361,7 +408,7 @@ export default function Home() {
                 <div style={{ fontSize: 12, color: "#9aa0a6" }}>
                   {a.provider_id && a.model
                     ? `${a.provider_id} → ${a.model}`
-                    : "auto (not assigned yet)"}
+                    : "auto"}
                 </div>
               </div>
             ))}
@@ -375,58 +422,61 @@ export default function Home() {
           <input style={input} placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
           <textarea style={{ ...input, minHeight: 60 }} placeholder="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
           <textarea style={{ ...input, minHeight: 60 }} placeholder="Instructions for all agents" value={instructions} onChange={(e) => setInstructions(e.target.value)} />
-          <button style={btn} disabled={busy} onClick={publishTask}>
+          <button type="button" style={btn} disabled={busy} onClick={publishTask}>
             Publish task
           </button>
         </section>
       )}
 
       {tab === "agents" && (
-        <>
-          <section style={card}>
-            <button style={{ ...btn, background: "#8b5cf6", marginBottom: 12 }} onClick={doAutoAssign}>
-              Auto-assign from context
-            </button>
-            <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 0 }}>
-              Architect → reasoning models · Coder → code models · Reviewer → fast/review. Uses loaded OpenRouter catalogs when available.
-            </p>
-            {agents.map((a) => (
-              <div key={a.id} style={{ ...contrib, marginBottom: 10 }}>
-                <strong>{a.role}</strong> <span style={{ color: "#9aa0a6", fontSize: 12 }}>({a.id})</span>
-                <div style={{ marginTop: 8 }}>
-                  <label style={label}>Provider</label>
-                  <select
-                    style={input}
-                    value={a.provider_id || ""}
-                    onChange={(e) =>
-                      setAgents((prev) =>
-                        prev.map((x) => (x.id === a.id ? { ...x, provider_id: e.target.value || undefined } : x))
+        <section style={card}>
+          <button type="button" style={{ ...btn, background: "#8b5cf6", marginBottom: 12 }} onClick={doAutoAssign}>
+            Auto-assign from context
+          </button>
+          <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 0 }}>
+            Leave provider/model empty for auto. More agent types can be added later without breaking this screen.
+          </p>
+          {agents.map((a) => (
+            <div key={a.id} style={{ ...contrib, marginBottom: 10 }}>
+              <strong>{a.role}</strong>{" "}
+              <span style={{ color: "#9aa0a6", fontSize: 12 }}>({a.id})</span>
+              <div style={{ marginTop: 8 }}>
+                <label style={label}>Provider</label>
+                <select
+                  style={input}
+                  value={a.provider_id || ""}
+                  onChange={(e) =>
+                    setAgents((prev) =>
+                      prev.map((x) =>
+                        x.id === a.id ? { ...x, provider_id: e.target.value || undefined } : x
                       )
-                    }
-                  >
-                    <option value="">(auto)</option>
-                    {providers.filter((p) => p.enabled).map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                  <label style={label}>Model</label>
-                  <input
-                    style={input}
-                    placeholder="model id or leave blank for auto"
-                    value={a.model || ""}
-                    onChange={(e) =>
-                      setAgents((prev) =>
-                        prev.map((x) => (x.id === a.id ? { ...x, model: e.target.value || undefined } : x))
+                    )
+                  }
+                >
+                  <option value="">(auto)</option>
+                  {providers.filter((p) => p.enabled).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+                <label style={label}>Model</label>
+                <input
+                  style={input}
+                  placeholder="model id or blank for auto"
+                  value={a.model || ""}
+                  onChange={(e) =>
+                    setAgents((prev) =>
+                      prev.map((x) =>
+                        x.id === a.id ? { ...x, model: e.target.value || undefined } : x
                       )
-                    }
-                  />
-                </div>
+                    )
+                  }
+                />
               </div>
-            ))}
-          </section>
-        </>
+            </div>
+          ))}
+        </section>
       )}
 
       {tab === "activity" && (
@@ -438,7 +488,8 @@ export default function Home() {
             history.map((c) => (
               <div key={c.id} style={{ ...contrib, marginBottom: 10 }}>
                 <div style={{ fontSize: 11, color: "#9aa0a6" }}>
-                  <strong style={{ color: "#e8eaed" }}>{c.agent_name}</strong> · {c.role} · {c.contribution_type}
+                  <strong style={{ color: "#e8eaed" }}>{c.agent_name}</strong> · {c.role} ·{" "}
+                  {c.contribution_type}
                 </div>
                 <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 13 }}>
                   {c.content}
@@ -459,28 +510,33 @@ export default function Home() {
                   <div>
                     <strong>{p.name}</strong>
                     <div style={{ fontSize: 12, color: "#9aa0a6" }}>
-                      {p.model || "(load models)"} · {p.models?.length ? `${p.models.length} models cached` : "no catalog"}
+                      {p.model || "(set default)"}
+                      {p.models?.length ? ` · ${p.models.length} models` : ""}
                     </div>
                     <div style={{ fontSize: 12, color: p.last_ok ? "#6ee7b7" : "#fca5a5", marginTop: 4 }}>
                       {p.last_test || "not tested"}
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    <button style={smallBtn} onClick={() => testProvider(p)} disabled={testing === p.id}>
+                    <button type="button" style={smallBtn} onClick={() => testProvider(p)} disabled={testing === p.id}>
                       {testing === p.id ? "…" : "Test"}
                     </button>
-                    <button style={smallBtn} onClick={() => loadModels(p)} disabled={loadingModels === p.id}>
+                    <button type="button" style={smallBtn} onClick={() => loadModels(p)} disabled={loadingModels === p.id}>
                       {loadingModels === p.id ? "…" : "Models"}
                     </button>
                     <button
+                      type="button"
                       style={smallBtn}
                       onClick={() =>
-                        setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x)))
+                        setProviders((prev) =>
+                          prev.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x))
+                        )
                       }
                     >
                       {p.enabled ? "Disable" : "Enable"}
                     </button>
                     <button
+                      type="button"
                       style={{ ...smallBtn, background: "#7f1d1d" }}
                       onClick={() => setProviders((prev) => prev.filter((x) => x.id !== p.id))}
                     >
@@ -494,10 +550,10 @@ export default function Home() {
 
           {browseFor && (
             <section style={{ ...card, marginTop: 12 }}>
-              <h2 style={h2}>Model catalog — {browseFor}</h2>
+              <h2 style={h2}>Models — {browseFor}</h2>
               <input
                 style={input}
-                placeholder="Filter (code, claude, deepseek…)"
+                placeholder="Filter…"
                 value={modelFilter}
                 onChange={(e) => setModelFilter(e.target.value)}
               />
@@ -505,6 +561,7 @@ export default function Home() {
                 {filteredModels.slice(0, 80).map((m) => (
                   <button
                     key={m.id}
+                    type="button"
                     style={{
                       ...row,
                       display: "block",
@@ -521,7 +578,7 @@ export default function Home() {
                       setProviders((prev) =>
                         prev.map((x) => (x.id === browseFor ? { ...x, model: m.id } : x))
                       );
-                      setMsg(`Default model for ${browseFor}: ${m.id}`);
+                      setMsg(`Default for ${browseFor}: ${m.id}`);
                     }}
                   >
                     <div style={{ fontSize: 13 }}>{m.id}</div>
@@ -538,6 +595,7 @@ export default function Home() {
               {PRESETS.map((pr) => (
                 <button
                   key={pr.name}
+                  type="button"
                   style={smallBtn}
                   onClick={() =>
                     setForm({
@@ -556,12 +614,11 @@ export default function Home() {
 
           <section style={{ ...card, marginTop: 12 }}>
             <h2 style={h2}>Add provider</h2>
-            <p style={{ color: "#9aa0a6", fontSize: 12 }}>One OpenRouter key → many models via Models button.</p>
             <input style={input} placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <input style={input} placeholder="Base URL" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
-            <input style={input} placeholder="Default model id" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+            <input style={input} placeholder="Default model" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
             <input style={input} placeholder="API key" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
-            <button style={btn} onClick={saveProvider}>
+            <button type="button" style={btn} onClick={saveProvider}>
               Save provider
             </button>
           </section>
