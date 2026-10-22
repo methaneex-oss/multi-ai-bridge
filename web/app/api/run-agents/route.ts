@@ -2,25 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 
 const BRIDGE = (process.env.BRIDGE_URL || "").replace(/\/$/, "");
 const API_KEY = process.env.BRIDGE_API_KEY || "";
-const OPENROUTER = process.env.OPENROUTER_API_KEY || "";
 
-type AgentDef = { id: string; role: string; model: string; temperature?: number };
-
-const DEFAULT_AGENTS: AgentDef[] = [
-  { id: "architect", role: "Architect", model: "anthropic/claude-sonnet-4", temperature: 0.3 },
-  { id: "coder", role: "Coder", model: "deepseek/deepseek-chat", temperature: 0.2 },
-  { id: "reviewer", role: "Reviewer", model: "openai/gpt-4o-mini", temperature: 0.2 },
-];
-
-function agentsFromEnv(): AgentDef[] {
-  const raw = process.env.AGENTS_JSON;
-  if (!raw) return DEFAULT_AGENTS;
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length) return parsed;
-  } catch { /* ignore */ }
-  return DEFAULT_AGENTS;
-}
+type Provider = {
+  id: string;
+  name: string;
+  base_url: string;
+  model: string;
+  api_key: string;
+  enabled: boolean;
+  role?: string;
+};
 
 async function bridge(path: string, init?: RequestInit) {
   const headers: Record<string, string> = {
@@ -40,42 +31,57 @@ async function bridge(path: string, init?: RequestInit) {
   return data;
 }
 
-async function openRouterChat(model: string, messages: { role: string; content: string }[], temperature: number) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+async function chat(p: Provider, messages: { role: string; content: string }[]) {
+  const base = p.base_url.replace(/\/$/, "");
+  const res = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENROUTER}`,
+      Authorization: `Bearer ${p.api_key}`,
       "Content-Type": "application/json",
       "HTTP-Referer": "https://github.com/methaneex-oss/multi-ai-bridge",
       "X-Title": "Multi-AI Bridge",
     },
-    body: JSON.stringify({ model, messages, temperature, max_tokens: 2048 }),
+    body: JSON.stringify({ model: p.model, messages, max_tokens: 2048, temperature: 0.3 }),
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(`OpenRouter ${res.status}: ${JSON.stringify(data).slice(0, 400)}`);
+    throw new Error(data?.error?.message || data?.error || JSON.stringify(data).slice(0, 300));
   }
-  return data?.choices?.[0]?.message?.content || "(empty response)";
+  return data?.choices?.[0]?.message?.content || "(empty)";
 }
 
 export async function POST(req: NextRequest) {
   if (!BRIDGE) {
-    return NextResponse.json({ error: "Set BRIDGE_URL on this service" }, { status: 500 });
-  }
-  if (!OPENROUTER) {
-    return NextResponse.json(
-      {
-        error: "Set OPENROUTER_API_KEY on the UI service (Render Environment)",
-        hint: "One OpenRouter key runs all models listed in the agent team.",
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Set BRIDGE_URL on UI service" }, { status: 500 });
   }
 
-  let body: { agentIds?: string[] } = {};
+  let body: { providers?: Provider[] } = {};
   try {
     body = await req.json();
-  } catch { /* empty body ok */ }
+  } catch { /* ok */ }
+
+  const providers = (body.providers || []).filter((p) => p.enabled && p.api_key && p.base_url && p.model);
+  if (!providers.length) {
+    // fallback: env OpenRouter single provider
+    const or = process.env.OPENROUTER_API_KEY;
+    if (or) {
+      providers.push({
+        id: "openrouter",
+        name: "openrouter",
+        base_url: "https://openrouter.ai/api/v1",
+        model: process.env.DEFAULT_MODEL || "deepseek/deepseek-chat",
+        api_key: or,
+        enabled: true,
+        role: "Agent",
+      });
+    }
+  }
+  if (!providers.length) {
+    return NextResponse.json(
+      { error: "No enabled providers. Add one under Providers and Test it, or set OPENROUTER_API_KEY." },
+      { status: 400 }
+    );
+  }
 
   try {
     let state = await bridge("api/v1/state");
@@ -84,79 +90,58 @@ export async function POST(req: NextRequest) {
         method: "POST",
         body: JSON.stringify({
           title: "Coordinate and advance the active project",
-          description:
-            "Multi-agent team: inspect shared state, propose the next useful step, post concrete contributions.",
-          instructions:
-            "Use the shared bridge only. Prefer smallest vertical slice. Record decisions and open questions.",
-          goals: ["Clear next step", "Documented decisions"],
-          constraints: ["No private unshared state"],
+          description: "Multi-agent team working from shared bridge state.",
+          instructions: "Prefer concrete next steps. Record decisions and questions.",
+          goals: ["Clear next step"],
+          constraints: ["Use shared bridge only"],
         }),
       });
     }
+    let history = await bridge("api/v1/history");
+    const results: { name: string; ok: boolean; detail?: string }[] = [];
 
-    const history = await bridge("api/v1/history");
-    const agents = agentsFromEnv().filter((a) => !body.agentIds || body.agentIds.includes(a.id));
-    const results: { id: string; role: string; ok: boolean; detail?: string }[] = [];
-
-    for (const agent of agents) {
-      const histLines = (Array.isArray(history) ? history : [])
-        .slice(0, 10)
-        .map(
-          (h: any) =>
-            `- [${h.role}/${h.agent_name}] (${h.contribution_type}): ${String(h.content || "").slice(0, 400)}`
-        )
+    for (const p of providers) {
+      const role = p.role || p.name;
+      const hist = (Array.isArray(history) ? history : [])
+        .slice(0, 8)
+        .map((h: any) => `- [${h.role}] ${String(h.content || "").slice(0, 350)}`)
         .join("\n");
-
       const messages = [
         {
           role: "system",
-          content: [
-            `You are an AI agent with role: ${agent.role}.`,
-            "You coordinate via a shared multi-agent bridge. Respect shared state.",
-            state.instructions
-              ? `\n=== PROJECT RULES ===\n${state.instructions}`
-              : "",
-          ].join("\n"),
+          content: `You are ${role} on a multi-agent bridge.\n${state.instructions || ""}`,
         },
         {
           role: "user",
-          content: `Task: ${state.task_title}\n${state.task_description || ""}\nGoals: ${JSON.stringify(
-            state.goals || []
-          )}\nStatus: ${state.current_status}\nOpen questions: ${JSON.stringify(
-            state.open_questions || []
-          )}\n\nRecent contributions:\n${histLines || "(none)"}\n\nAs ${agent.role}, produce the next useful contribution. Be concrete.`,
+          content: `Task: ${state.task_title}\n${state.task_description || ""}\nStatus: ${state.current_status}\n\nRecent:\n${hist || "(none)"}\n\nProduce the next useful contribution as ${role}.`,
         },
       ];
-
       try {
-        const content = await openRouterChat(agent.model, messages, agent.temperature ?? 0.3);
-        let ctype = "update";
-        const r = agent.role.toLowerCase();
-        if (r.includes("architect")) ctype = "plan";
-        else if (r.includes("coder") || r.includes("engineer")) ctype = "code";
-        else if (r.includes("review")) ctype = "review";
-
+        const content = await chat(p, messages);
         await bridge("api/v1/contribute", {
           method: "POST",
           body: JSON.stringify({
-            agent_name: agent.id,
-            role: agent.role,
+            agent_name: p.name,
+            role,
             content,
-            contribution_type: ctype,
-            metadata: { model: agent.model, source: "ui-run-agents" },
+            contribution_type: "update",
+            metadata: { model: p.model, provider: p.name },
           }),
         });
-        results.push({ id: agent.id, role: agent.role, ok: true });
-        // refresh history for next agent
+        results.push({ name: p.name, ok: true });
+        history = await bridge("api/v1/history");
         state = await bridge("api/v1/state");
       } catch (e: any) {
-        results.push({ id: agent.id, role: agent.role, ok: false, detail: e?.message || String(e) });
+        results.push({ name: p.name, ok: false, detail: e?.message || String(e) });
       }
     }
 
-    const finalState = await bridge("api/v1/state");
-    const finalHistory = await bridge("api/v1/history");
-    return NextResponse.json({ ok: true, results, state: finalState, history: finalHistory });
+    return NextResponse.json({
+      ok: true,
+      results,
+      state: await bridge("api/v1/state"),
+      history: await bridge("api/v1/history"),
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
   }
