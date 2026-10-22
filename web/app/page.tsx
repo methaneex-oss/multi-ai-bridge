@@ -1,15 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { autoAssignAgents, DEFAULT_AGENTS, type AgentDef } from "../lib/autoAssign";
 
-type Tab = "overview" | "tasks" | "activity" | "providers";
+type Tab = "overview" | "tasks" | "agents" | "activity" | "providers";
 
 type State = {
   task_title?: string;
   task_description?: string;
   instructions?: string;
   current_status?: string;
-  open_questions?: string[];
+  goals?: string[];
   version?: number;
 };
 
@@ -21,26 +22,34 @@ type Contribution = {
   contribution_type: string;
 };
 
+type ModelInfo = {
+  id: string;
+  name?: string;
+  tags?: string[];
+  context?: number | null;
+};
+
 type Provider = {
   id: string;
   name: string;
   base_url: string;
-  model: string;
+  model: string; // default model when catalog not loaded
   api_key: string;
   enabled: boolean;
-  role: string;
+  models?: ModelInfo[];
   last_test?: string;
   last_ok?: boolean;
 };
 
 const api = (p: string) => `/api/bridge/${p.replace(/^\//, "")}`;
-const LS_KEY = "mab_providers_v1";
+const LS_P = "mab_providers_v2";
+const LS_A = "mab_agents_v2";
 
 const PRESETS: Partial<Provider>[] = [
-  { name: "openrouter", base_url: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat", role: "Coder" },
-  { name: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", role: "Reviewer" },
-  { name: "deepseek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat", role: "Coder" },
-  { name: "xai", base_url: "https://api.x.ai/v1", model: "grok-3-mini", role: "Architect" },
+  { name: "openrouter", base_url: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat" },
+  { name: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  { name: "deepseek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  { name: "xai", base_url: "https://api.x.ai/v1", model: "grok-3-mini" },
 ];
 
 export default function Home() {
@@ -57,21 +66,34 @@ export default function Home() {
   const [instructions, setInstructions] = useState("");
 
   const [providers, setProviders] = useState<Provider[]>([]);
-  const [form, setForm] = useState({ name: "", base_url: "", model: "", api_key: "", role: "Agent" });
+  const [agents, setAgents] = useState<AgentDef[]>(DEFAULT_AGENTS);
+  const [form, setForm] = useState({ name: "", base_url: "", model: "", api_key: "" });
   const [testing, setTesting] = useState<string | null>(null);
+  const [loadingModels, setLoadingModels] = useState<string | null>(null);
+  const [browseModels, setBrowseModels] = useState<ModelInfo[]>([]);
+  const [browseFor, setBrowseFor] = useState<string | null>(null);
+  const [modelFilter, setModelFilter] = useState("");
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (raw) setProviders(JSON.parse(raw));
-    } catch { /* ignore */ }
+      const p = localStorage.getItem(LS_P);
+      const a = localStorage.getItem(LS_A);
+      if (p) setProviders(JSON.parse(p));
+      if (a) setAgents(JSON.parse(a));
+    } catch { /* */ }
   }, []);
 
   useEffect(() => {
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify(providers));
-    } catch { /* ignore */ }
+      localStorage.setItem(LS_P, JSON.stringify(providers));
+    } catch { /* */ }
   }, [providers]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LS_A, JSON.stringify(agents));
+    } catch { /* */ }
+  }, [agents]);
 
   const refresh = useCallback(async () => {
     try {
@@ -98,7 +120,7 @@ export default function Home() {
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 10000);
+    const id = setInterval(refresh, 12000);
     return () => clearInterval(id);
   }, [refresh]);
 
@@ -134,7 +156,11 @@ export default function Home() {
       const res = await fetch("/api/test-provider", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base_url: p.base_url, model: p.model, api_key: p.api_key }),
+        body: JSON.stringify({
+          base_url: p.base_url,
+          model: p.model || p.models?.[0]?.id,
+          api_key: p.api_key,
+        }),
       });
       const data = await res.json();
       setProviders((prev) =>
@@ -153,8 +179,32 @@ export default function Home() {
     }
   }
 
+  async function loadModels(p: Provider) {
+    setLoadingModels(p.id);
+    setBrowseFor(p.id);
+    setModelFilter("");
+    try {
+      const res = await fetch("/api/list-models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base_url: p.base_url, api_key: p.api_key, name: p.name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "list failed");
+      const models: ModelInfo[] = data.models || [];
+      setBrowseModels(models);
+      setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, models } : x)));
+      setMsg(`Loaded ${models.length} models from ${p.name}`);
+    } catch (e: any) {
+      setMsg(`Models: ${e.message}`);
+      setBrowseModels([]);
+    } finally {
+      setLoadingModels(null);
+    }
+  }
+
   function saveProvider() {
-    if (!form.name || !form.base_url || !form.model) return;
+    if (!form.name || !form.base_url) return;
     const id = form.name.toLowerCase().replace(/\s+/g, "-");
     setProviders((prev) => {
       const existing = prev.find((p) => p.id === id);
@@ -162,28 +212,39 @@ export default function Home() {
         id,
         name: form.name,
         base_url: form.base_url,
-        model: form.model,
+        model: form.model || existing?.model || "",
         api_key: form.api_key || existing?.api_key || "",
         enabled: existing?.enabled ?? true,
-        role: form.role || "Agent",
+        models: existing?.models,
         last_test: existing?.last_test,
         last_ok: existing?.last_ok,
       };
       if (existing) return prev.map((p) => (p.id === id ? next : p));
       return [...prev, next];
     });
-    setForm({ name: "", base_url: "", model: "", api_key: "", role: "Agent" });
+    setForm({ name: "", base_url: "", model: "", api_key: "" });
     setMsg("Provider saved");
   }
 
-  function applyPreset(pr: Partial<Provider>) {
-    setForm({
-      name: pr.name || "",
-      base_url: pr.base_url || "",
-      model: pr.model || "",
-      api_key: "",
-      role: pr.role || "Agent",
-    });
+  function doAutoAssign() {
+    const ctx = [state?.task_title, state?.task_description, state?.instructions, ...(state?.goals || [])]
+      .filter(Boolean)
+      .join(" ");
+    const provInfos = providers.map((p) => ({
+      id: p.id,
+      name: p.name,
+      enabled: p.enabled,
+      api_key: p.api_key,
+      base_url: p.base_url,
+      models: p.models?.length
+        ? p.models
+        : p.model
+          ? [{ id: p.model, tags: ["general"] }]
+          : [],
+    }));
+    const next = autoAssignAgents(agents, provInfos, ctx || "general project");
+    setAgents(next);
+    setMsg("Auto-assigned agents from role + project context");
   }
 
   async function runAgents() {
@@ -193,13 +254,35 @@ export default function Home() {
       const res = await fetch("/api/run-agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providers }),
+        body: JSON.stringify({
+          providers: providers.map((p) => ({
+            id: p.id,
+            name: p.name,
+            enabled: p.enabled,
+            api_key: p.api_key,
+            base_url: p.base_url,
+            models: p.models?.length ? p.models : p.model ? [{ id: p.model, tags: ["general"] }] : [],
+          })),
+          agents,
+          auto_assign: true,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Run failed");
+      if (data.assignments) {
+        setAgents((prev) =>
+          prev.map((a) => {
+            const m = data.assignments.find((x: any) => x.id === a.id);
+            return m ? { ...a, provider_id: m.provider_id, model: m.model } : a;
+          })
+        );
+      }
       const ok = (data.results || []).filter((r: any) => r.ok).length;
       const bad = (data.results || []).filter((r: any) => !r.ok);
-      setMsg(`Run done: ${ok} ok` + (bad.length ? `, ${bad.length} failed — ${bad[0]?.detail || ""}` : ""));
+      setMsg(
+        `Run: ${ok} ok` +
+          (bad.length ? ` · ${bad.length} failed (${bad[0]?.agent}: ${bad[0]?.detail || ""})` : "")
+      );
       if (data.state) setState(data.state);
       if (data.history) setHistory(data.history);
       else await refresh();
@@ -213,15 +296,25 @@ export default function Home() {
   const tabs: { id: Tab; label: string }[] = [
     { id: "overview", label: "Overview" },
     { id: "tasks", label: "Tasks" },
+    { id: "agents", label: "Agents" },
     { id: "activity", label: "Activity" },
     { id: "providers", label: "Providers" },
   ];
+
+  const filteredModels = browseModels.filter(
+    (m) =>
+      !modelFilter ||
+      m.id.toLowerCase().includes(modelFilter.toLowerCase()) ||
+      (m.tags || []).some((t) => t.includes(modelFilter.toLowerCase()))
+  );
 
   return (
     <main style={page}>
       <header style={{ marginBottom: 12 }}>
         <h1 style={{ margin: 0, fontSize: 20 }}>Multi-AI Bridge</h1>
-        <p style={{ margin: "4px 0 0", color: "#9aa0a6", fontSize: 12 }}>Shared state · Providers · Agents</p>
+        <p style={{ margin: "4px 0 0", color: "#9aa0a6", fontSize: 12 }}>
+          Multi-provider · Assign agents · Auto-route by context
+        </p>
       </header>
 
       <nav style={nav}>
@@ -246,32 +339,32 @@ export default function Home() {
         <>
           <section style={card}>
             <button style={{ ...btn, background: running ? "#374151" : "#10b981" }} disabled={running} onClick={runAgents}>
-              {running ? "Running…" : "▶ Run enabled providers"}
+              {running ? "Running agents…" : "▶ Run agents"}
             </button>
             <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 10 }}>
-              Uses Providers you enabled & tested. Fallback: OPENROUTER_API_KEY on server.
+              Uses agent assignments. Unassigned agents are auto-matched to models by role + task context.
             </p>
           </section>
           <section style={{ ...card, marginTop: 12 }}>
-            <h2 style={h2}>Current task</h2>
+            <h2 style={h2}>Task</h2>
             <p style={{ fontWeight: 600, margin: "0 0 6px" }}>{state?.task_title || "(none)"}</p>
             <p style={{ color: "#bdc1c6", fontSize: 14, margin: 0 }}>{state?.task_description}</p>
-            <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 8 }}>Status: {state?.current_status || "idle"} · v{state?.version ?? 0}</p>
+            <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 8 }}>
+              {state?.current_status || "idle"} · v{state?.version ?? 0}
+            </p>
           </section>
           <section style={{ ...card, marginTop: 12 }}>
-            <h2 style={h2}>Providers snapshot</h2>
-            {!providers.length ? (
-              <p style={{ color: "#9aa0a6", fontSize: 13 }}>None — open Providers tab</p>
-            ) : (
-              providers.map((p) => (
-                <div key={p.id} style={row}>
-                  <strong>{p.name}</strong> {p.enabled ? "· on" : "· off"}
-                  <div style={{ fontSize: 12, color: p.last_ok ? "#6ee7b7" : "#fca5a5" }}>
-                    {p.last_test || "not tested"}
-                  </div>
+            <h2 style={h2}>Agent lineup</h2>
+            {agents.map((a) => (
+              <div key={a.id} style={row}>
+                <strong>{a.role}</strong>
+                <div style={{ fontSize: 12, color: "#9aa0a6" }}>
+                  {a.provider_id && a.model
+                    ? `${a.provider_id} → ${a.model}`
+                    : "auto (not assigned yet)"}
                 </div>
-              ))
-            )}
+              </div>
+            ))}
           </section>
         </>
       )}
@@ -288,18 +381,68 @@ export default function Home() {
         </section>
       )}
 
+      {tab === "agents" && (
+        <>
+          <section style={card}>
+            <button style={{ ...btn, background: "#8b5cf6", marginBottom: 12 }} onClick={doAutoAssign}>
+              Auto-assign from context
+            </button>
+            <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 0 }}>
+              Architect → reasoning models · Coder → code models · Reviewer → fast/review. Uses loaded OpenRouter catalogs when available.
+            </p>
+            {agents.map((a) => (
+              <div key={a.id} style={{ ...contrib, marginBottom: 10 }}>
+                <strong>{a.role}</strong> <span style={{ color: "#9aa0a6", fontSize: 12 }}>({a.id})</span>
+                <div style={{ marginTop: 8 }}>
+                  <label style={label}>Provider</label>
+                  <select
+                    style={input}
+                    value={a.provider_id || ""}
+                    onChange={(e) =>
+                      setAgents((prev) =>
+                        prev.map((x) => (x.id === a.id ? { ...x, provider_id: e.target.value || undefined } : x))
+                      )
+                    }
+                  >
+                    <option value="">(auto)</option>
+                    {providers.filter((p) => p.enabled).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  <label style={label}>Model</label>
+                  <input
+                    style={input}
+                    placeholder="model id or leave blank for auto"
+                    value={a.model || ""}
+                    onChange={(e) =>
+                      setAgents((prev) =>
+                        prev.map((x) => (x.id === a.id ? { ...x, model: e.target.value || undefined } : x))
+                      )
+                    }
+                  />
+                </div>
+              </div>
+            ))}
+          </section>
+        </>
+      )}
+
       {tab === "activity" && (
         <section style={card}>
-          <h2 style={h2}>Contribution timeline</h2>
+          <h2 style={h2}>Timeline</h2>
           {!history.length ? (
-            <p style={{ color: "#9aa0a6", fontSize: 13 }}>Empty — run providers from Overview</p>
+            <p style={{ color: "#9aa0a6", fontSize: 13 }}>Empty — run agents</p>
           ) : (
             history.map((c) => (
-              <div key={c.id} style={contrib}>
+              <div key={c.id} style={{ ...contrib, marginBottom: 10 }}>
                 <div style={{ fontSize: 11, color: "#9aa0a6" }}>
                   <strong style={{ color: "#e8eaed" }}>{c.agent_name}</strong> · {c.role} · {c.contribution_type}
                 </div>
-                <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 13 }}>{c.content}</pre>
+                <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 13 }}>
+                  {c.content}
+                </pre>
               </div>
             ))
           )}
@@ -309,15 +452,14 @@ export default function Home() {
       {tab === "providers" && (
         <>
           <section style={card}>
-            <h2 style={h2}>Your providers</h2>
-            {!providers.length && <p style={{ color: "#9aa0a6", fontSize: 13 }}>Add OpenRouter first — one key, many models.</p>}
+            <h2 style={h2}>Providers</h2>
             {providers.map((p) => (
               <div key={p.id} style={{ ...contrib, marginBottom: 10 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                   <div>
                     <strong>{p.name}</strong>
                     <div style={{ fontSize: 12, color: "#9aa0a6" }}>
-                      {p.model} · {p.role}
+                      {p.model || "(load models)"} · {p.models?.length ? `${p.models.length} models cached` : "no catalog"}
                     </div>
                     <div style={{ fontSize: 12, color: p.last_ok ? "#6ee7b7" : "#fca5a5", marginTop: 4 }}>
                       {p.last_test || "not tested"}
@@ -327,6 +469,9 @@ export default function Home() {
                     <button style={smallBtn} onClick={() => testProvider(p)} disabled={testing === p.id}>
                       {testing === p.id ? "…" : "Test"}
                     </button>
+                    <button style={smallBtn} onClick={() => loadModels(p)} disabled={loadingModels === p.id}>
+                      {loadingModels === p.id ? "…" : "Models"}
+                    </button>
                     <button
                       style={smallBtn}
                       onClick={() =>
@@ -335,7 +480,10 @@ export default function Home() {
                     >
                       {p.enabled ? "Disable" : "Enable"}
                     </button>
-                    <button style={{ ...smallBtn, background: "#7f1d1d" }} onClick={() => setProviders((prev) => prev.filter((x) => x.id !== p.id))}>
+                    <button
+                      style={{ ...smallBtn, background: "#7f1d1d" }}
+                      onClick={() => setProviders((prev) => prev.filter((x) => x.id !== p.id))}
+                    >
                       Delete
                     </button>
                   </div>
@@ -344,11 +492,62 @@ export default function Home() {
             ))}
           </section>
 
+          {browseFor && (
+            <section style={{ ...card, marginTop: 12 }}>
+              <h2 style={h2}>Model catalog — {browseFor}</h2>
+              <input
+                style={input}
+                placeholder="Filter (code, claude, deepseek…)"
+                value={modelFilter}
+                onChange={(e) => setModelFilter(e.target.value)}
+              />
+              <div style={{ maxHeight: 280, overflow: "auto" }}>
+                {filteredModels.slice(0, 80).map((m) => (
+                  <button
+                    key={m.id}
+                    style={{
+                      ...row,
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      background: "transparent",
+                      border: "none",
+                      borderBottom: "1px solid #252a35",
+                      color: "#e8eaed",
+                      cursor: "pointer",
+                      padding: "8px 0",
+                    }}
+                    onClick={() => {
+                      setProviders((prev) =>
+                        prev.map((x) => (x.id === browseFor ? { ...x, model: m.id } : x))
+                      );
+                      setMsg(`Default model for ${browseFor}: ${m.id}`);
+                    }}
+                  >
+                    <div style={{ fontSize: 13 }}>{m.id}</div>
+                    <div style={{ fontSize: 11, color: "#9aa0a6" }}>{(m.tags || []).join(", ")}</div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
           <section style={{ ...card, marginTop: 12 }}>
             <h2 style={h2}>Presets</h2>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {PRESETS.map((pr) => (
-                <button key={pr.name} style={smallBtn} onClick={() => applyPreset(pr)}>
+                <button
+                  key={pr.name}
+                  style={smallBtn}
+                  onClick={() =>
+                    setForm({
+                      name: pr.name || "",
+                      base_url: pr.base_url || "",
+                      model: pr.model || "",
+                      api_key: "",
+                    })
+                  }
+                >
                   {pr.name}
                 </button>
               ))}
@@ -356,13 +555,12 @@ export default function Home() {
           </section>
 
           <section style={{ ...card, marginTop: 12 }}>
-            <h2 style={h2}>Add or edit provider</h2>
-            <p style={{ color: "#9aa0a6", fontSize: 12 }}>Any OpenAI-compatible API. Leave key blank to keep existing.</p>
-            <input style={input} placeholder="Name (e.g. openrouter)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <h2 style={h2}>Add provider</h2>
+            <p style={{ color: "#9aa0a6", fontSize: 12 }}>One OpenRouter key → many models via Models button.</p>
+            <input style={input} placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <input style={input} placeholder="Base URL" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
-            <input style={input} placeholder="Model" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+            <input style={input} placeholder="Default model id" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
             <input style={input} placeholder="API key" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
-            <input style={input} placeholder="Role (Architect / Coder / …)" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} />
             <button style={btn} onClick={saveProvider}>
               Save provider
             </button>
@@ -374,25 +572,98 @@ export default function Home() {
 }
 
 const page: React.CSSProperties = {
-  fontFamily: "system-ui,sans-serif", padding: "14px 12px 48px", maxWidth: 720, margin: "0 auto",
-  background: "#0b0d12", color: "#e8eaed", minHeight: "100vh",
+  fontFamily: "system-ui,sans-serif",
+  padding: "14px 12px 48px",
+  maxWidth: 720,
+  margin: "0 auto",
+  background: "#0b0d12",
+  color: "#e8eaed",
+  minHeight: "100vh",
 };
 const nav: React.CSSProperties = { display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" };
-const tabOn: React.CSSProperties = { padding: "8px 12px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontWeight: 600, fontSize: 13 };
-const tabOff: React.CSSProperties = { padding: "8px 12px", borderRadius: 8, border: "1px solid #252a35", background: "#14171e", color: "#c5cae0", fontSize: 13 };
-const card: React.CSSProperties = { background: "#14171e", border: "1px solid #252a35", borderRadius: 14, padding: 14 };
-const h2: React.CSSProperties = { margin: "0 0 10px", fontSize: 11, fontWeight: 700, color: "#9aa0a6", textTransform: "uppercase", letterSpacing: 0.6 };
+const tabOn: React.CSSProperties = {
+  padding: "8px 12px",
+  borderRadius: 8,
+  border: "none",
+  background: "#3b82f6",
+  color: "#fff",
+  fontWeight: 600,
+  fontSize: 13,
+};
+const tabOff: React.CSSProperties = {
+  padding: "8px 12px",
+  borderRadius: 8,
+  border: "1px solid #252a35",
+  background: "#14171e",
+  color: "#c5cae0",
+  fontSize: 13,
+};
+const card: React.CSSProperties = {
+  background: "#14171e",
+  border: "1px solid #252a35",
+  borderRadius: 14,
+  padding: 14,
+};
+const h2: React.CSSProperties = {
+  margin: "0 0 10px",
+  fontSize: 11,
+  fontWeight: 700,
+  color: "#9aa0a6",
+  textTransform: "uppercase",
+  letterSpacing: 0.6,
+};
 const input: React.CSSProperties = {
-  width: "100%", boxSizing: "border-box", marginBottom: 8, padding: "10px 12px",
-  borderRadius: 10, border: "1px solid #2a2e35", background: "#0b0d12", color: "#e8eaed", fontSize: 14,
+  width: "100%",
+  boxSizing: "border-box",
+  marginBottom: 8,
+  padding: "10px 12px",
+  borderRadius: 10,
+  border: "1px solid #2a2e35",
+  background: "#0b0d12",
+  color: "#e8eaed",
+  fontSize: 14,
 };
 const btn: React.CSSProperties = {
-  padding: "10px 14px", borderRadius: 10, border: "none", background: "#3b82f6", color: "#fff",
-  fontWeight: 600, width: "100%", fontSize: 14,
+  padding: "10px 14px",
+  borderRadius: 10,
+  border: "none",
+  background: "#3b82f6",
+  color: "#fff",
+  fontWeight: 600,
+  width: "100%",
+  fontSize: 14,
 };
 const smallBtn: React.CSSProperties = {
-  padding: "6px 10px", borderRadius: 8, border: "none", background: "#374151", color: "#fff", fontSize: 12, fontWeight: 600,
+  padding: "6px 10px",
+  borderRadius: 8,
+  border: "none",
+  background: "#374151",
+  color: "#fff",
+  fontSize: 12,
+  fontWeight: 600,
 };
-const errBox: React.CSSProperties = { background: "#2a1215", border: "1px solid #7f1d1d", padding: 12, borderRadius: 12, marginBottom: 12, fontSize: 13 };
-const row: React.CSSProperties = { padding: "8px 0", borderBottom: "1px solid #252a35", fontSize: 13 };
-const contrib: React.CSSProperties = { background: "#0b0d12", borderRadius: 10, padding: 12, border: "1px solid #252a35" };
+const errBox: React.CSSProperties = {
+  background: "#2a1215",
+  border: "1px solid #7f1d1d",
+  padding: 12,
+  borderRadius: 12,
+  marginBottom: 12,
+  fontSize: 13,
+};
+const row: React.CSSProperties = {
+  padding: "8px 0",
+  borderBottom: "1px solid #252a35",
+  fontSize: 13,
+};
+const contrib: React.CSSProperties = {
+  background: "#0b0d12",
+  borderRadius: 10,
+  padding: 12,
+  border: "1px solid #252a35",
+};
+const label: React.CSSProperties = {
+  display: "block",
+  fontSize: 11,
+  color: "#9aa0a6",
+  marginBottom: 4,
+};
