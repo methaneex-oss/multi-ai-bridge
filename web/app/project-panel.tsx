@@ -5,7 +5,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 const bridge = (p: string) => `/api/bridge/${p.replace(/^\//, "")}`;
 
 type Project = { id: string; name: string; description?: string; rules?: string };
-type Artifact = { id: string; name: string; kind: string; content?: string };
+type Artifact = { id: string; name: string; kind: string };
 
 export function ProjectPanel({
   projectId,
@@ -64,13 +64,16 @@ export function ProjectPanel({
       body: JSON.stringify({
         id: projectId || undefined,
         name: name.trim(),
+        Name: name.trim(),
         description: description.trim(),
+        Description: description.trim(),
         rules: rules.trim(),
+        Rules: rules.trim(),
       }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setMsg(String(data.error || "Save failed — redeploy API if /projects missing"));
+      setMsg("Save failed — check API deploy");
       return;
     }
     onProjectId(data.id);
@@ -87,32 +90,31 @@ export function ProjectPanel({
       setMsg("Paste training text");
       return;
     }
-    const res = await fetch(bridge("api/v1/knowledge"), {
+    const payload = {
+      project_id: projectId,
+      ProjectID: projectId,
+      name: kName.trim() || "training",
+      Name: kName.trim() || "training",
+      content: kContent.trim(),
+      Content: kContent.trim(),
+      kind: "knowledge",
+      Kind: "knowledge",
+    };
+    let res = await fetch(bridge("api/v1/knowledge"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_id: projectId,
-        name: kName.trim() || "training",
-        content: kContent.trim(),
-        kind: "knowledge",
-      }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
-      // fallback artifacts
-      const r2 = await fetch(bridge("api/v1/artifacts"), {
+      res = await fetch(bridge("api/v1/artifacts"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          project_id: projectId,
-          name: kName.trim() || "training",
-          content: kContent.trim(),
-          kind: "knowledge",
-        }),
+        body: JSON.stringify(payload),
       });
-      if (!r2.ok) {
-        setMsg("Knowledge API failed — redeploy Render API");
-        return;
-      }
+    }
+    if (!res.ok) {
+      setMsg("Could not save knowledge");
+      return;
     }
     setKContent("");
     setKName("");
@@ -136,24 +138,18 @@ export function ProjectPanel({
   return (
     <div>
       <p style={help}>
-        <strong>Project</strong> = long-lived (rules + training data). <strong>Task</strong> = one job under that
-        project. Agents get both on every run.
+        <strong>Project</strong> = long-lived (rules + training data). <strong>Task</strong> = one job under it.
+        Agents get both on every run.
       </p>
       {msg && <p style={{ color: "#6ee7b7", fontSize: 12 }}>{msg}</p>}
 
       {projects.length > 0 && (
         <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11, color: "#9aa0a6", marginBottom: 6 }}>Open project</div>
           {projects.map((p) => (
             <div key={p.id} style={row}>
               <button
                 type="button"
-                style={{
-                  ...ghost,
-                  flex: 1,
-                  textAlign: "left",
-                  borderColor: projectId === p.id ? "#3b82f6" : "#2a2e35",
-                }}
+                style={{ ...ghost, flex: 1, textAlign: "left", borderColor: projectId === p.id ? "#3b82f6" : "#2a2e35" }}
                 onClick={() => {
                   onProjectId(p.id);
                   setName(p.name);
@@ -180,7 +176,7 @@ export function ProjectPanel({
       />
       <textarea
         style={{ ...input, minHeight: 72 }}
-        placeholder="Project rules (always apply to every task)"
+        placeholder="Project rules (always apply)"
         value={rules}
         onChange={(e) => setRules(e.target.value)}
       />
@@ -188,12 +184,12 @@ export function ProjectPanel({
         Save project
       </button>
 
-      <h3 style={{ fontSize: 13, margin: "16px 0 8px" }}>Training data / knowledge</h3>
-      <p style={help}>Paste specs, APIs, architecture notes, samples. Agents load this on every run.</p>
+      <h3 style={{ fontSize: 13, margin: "16px 0 8px" }}>Training data</h3>
+      <p style={help}>Paste specs, APIs, architecture, samples. Loaded into every agent run.</p>
       <input style={input} placeholder="Doc name" value={kName} onChange={(e) => setKName(e.target.value)} />
       <textarea
         style={{ ...input, minHeight: 100 }}
-        placeholder="Paste project knowledge here…"
+        placeholder="Paste knowledge…"
         value={kContent}
         onChange={(e) => setKContent(e.target.value)}
       />
