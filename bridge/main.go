@@ -179,6 +179,7 @@ func main() {
 	if err := initDB(db); err != nil {
 		log.Fatal(err)
 	}
+	migrateCoord(db)
 	hub := newHub()
 	go hub.run()
 	s := &Server{db: db, apiKey: apiKey, hub: hub}
@@ -200,6 +201,8 @@ func main() {
 	mux.HandleFunc("/api/v1/jobs", withCORS(s.auth(s.handleJobs)))
 	mux.HandleFunc("/api/v1/context", withCORS(s.auth(s.handleContext)))
 	mux.HandleFunc("/api/v1/knowledge", withCORS(s.auth(s.handleKnowledge)))
+	mux.HandleFunc("/api/v1/engineering-tasks", withCORS(s.auth(s.handleEngineeringTasks)))
+	mux.HandleFunc("/api/v1/memory", withCORS(s.auth(s.handleMemory)))
 	log.Printf("Multi-AI Bridge listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
@@ -207,7 +210,7 @@ func main() {
 func withCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
