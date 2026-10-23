@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { autoAssignAgents, DEFAULT_AGENTS, type AgentDef } from "../lib/autoAssign";
 
 type Tab = "overview" | "tasks" | "agents" | "activity" | "providers";
@@ -77,7 +77,7 @@ export default function Home() {
       if (p) setProviders(JSON.parse(p));
       if (a) setAgents(JSON.parse(a));
     } catch {
-      /* ignore corrupt local data */
+      /* ignore */
     }
   }, []);
 
@@ -85,7 +85,7 @@ export default function Home() {
     try {
       localStorage.setItem(LS_P, JSON.stringify(providers));
     } catch {
-      /* quota */
+      /* */
     }
   }, [providers]);
 
@@ -93,7 +93,7 @@ export default function Home() {
     try {
       localStorage.setItem(LS_A, JSON.stringify(agents));
     } catch {
-      /* quota */
+      /* */
     }
   }, [agents]);
 
@@ -117,8 +117,9 @@ export default function Home() {
         setHistory(Array.isArray(hj) ? hj : []);
       }
       setError(null);
-    } catch (e: any) {
-      setError(e.message || "Backend unreachable — open API /health then Retry");
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Backend unreachable — open API /health then Retry";
+      setError(message);
     }
   }, []);
 
@@ -148,8 +149,8 @@ export default function Home() {
       if (!res.ok) throw new Error(text.slice(0, 200));
       setMsg("Task published");
       await refresh();
-    } catch (e: any) {
-      setMsg(e.message);
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Failed");
     } finally {
       setBusy(false);
     }
@@ -185,9 +186,10 @@ export default function Home() {
             : x
         )
       );
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "test failed";
       setProviders((prev) =>
-        prev.map((x) => (x.id === p.id ? { ...x, last_ok: false, last_test: e.message } : x))
+        prev.map((x) => (x.id === p.id ? { ...x, last_ok: false, last_test: message } : x))
       );
     } finally {
       setTesting(null);
@@ -214,8 +216,8 @@ export default function Home() {
       setBrowseModels(models);
       setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, models } : x)));
       setMsg(`Loaded ${models.length} models from ${p.name}`);
-    } catch (e: any) {
-      setMsg(`Models: ${e.message}`);
+    } catch (e: unknown) {
+      setMsg(`Models: ${e instanceof Error ? e.message : "failed"}`);
       setBrowseModels([]);
     } finally {
       setLoadingModels(null);
@@ -301,24 +303,27 @@ export default function Home() {
       if (Array.isArray(data.assignments)) {
         setAgents((prev) =>
           prev.map((a) => {
-            const m = data.assignments.find((x: any) => x.id === a.id);
+            const m = data.assignments.find((x: { id: string; provider_id?: string; model?: string }) => x.id === a.id);
             return m ? { ...a, provider_id: m.provider_id, model: m.model } : a;
           })
         );
       }
 
       const list = data.results || [];
-      const ok = list.filter((r: any) => r.ok).length;
-      const bad = list.filter((r: any) => !r.ok);
+      const ok = list.filter((r: { ok: boolean }) => r.ok).length;
+      const bad = list.filter((r: { ok: boolean }) => !r.ok);
       setMsg(
         `${data.mode || runMode}: ${ok} ok` +
-          (bad.length ? ` · ${bad.length} failed` + (bad[0]?.detail ? ` (${bad[0].agent}: ${String(bad[0].detail).slice(0, 80)})` : "") : "")
+          (bad.length
+            ? ` · ${bad.length} failed` +
+              (bad[0]?.detail ? ` (${bad[0].agent}: ${String(bad[0].detail).slice(0, 80)})` : "")
+            : "")
       );
       if (data.state) setState(data.state);
       if (data.history) setHistory(data.history);
       else await refresh();
-    } catch (e: any) {
-      setError(e.message || "Run failed");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Run failed");
     } finally {
       setRunning(false);
     }
@@ -449,7 +454,7 @@ export default function Home() {
             Auto-assign from context
           </button>
           <p style={{ color: "#9aa0a6", fontSize: 12, marginTop: 0 }}>
-            Leave provider/model empty for auto. Future roles can be added without locking the system.
+            Leave provider/model empty for auto.
           </p>
           {agents.map((a) => (
             <div key={a.id} style={{ ...contrib, marginBottom: 10 }}>
@@ -504,8 +509,7 @@ export default function Home() {
             history.map((c) => (
               <div key={c.id} style={{ ...contrib, marginBottom: 10 }}>
                 <div style={{ fontSize: 11, color: "#9aa0a6" }}>
-                  <strong style={{ color: "#e8eaed" }}>{c.agent_name}</strong> · {c.role} ·{" "}
-                  {c.contribution_type}
+                  <strong style={{ color: "#e8eaed" }}>{c.agent_name}</strong> · {c.role} · {c.contribution_type}
                 </div>
                 <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", fontFamily: "inherit", fontSize: 13 }}>
                   {c.content}
@@ -632,30 +636,10 @@ export default function Home() {
 
           <section style={{ ...card, marginTop: 12 }}>
             <h2 style={h2}>Add provider</h2>
-            <input
-              style={input}
-              placeholder="Name"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-            />
-            <input
-              style={input}
-              placeholder="Base URL"
-              value={form.base_url}
-              onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-            />
-            <input
-              style={input}
-              placeholder="Default model id"
-              value={form.model}
-              onChange={(e) => setForm({ ...form, model: e.target.value })}
-            />
-            <input
-              style={input}
-              placeholder="API key"
-              value={form.api_key}
-              onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-            />
+            <input style={input} placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <input style={input} placeholder="Base URL" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
+            <input style={input} placeholder="Default model id" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+            <input style={input} placeholder="API key" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
             <button type="button" style={btn} onClick={saveProvider}>
               Save provider
             </button>
@@ -666,7 +650,7 @@ export default function Home() {
   );
 }
 
-const page: React.CSSProperties = {
+const page: CSSProperties = {
   fontFamily: "system-ui,sans-serif",
   padding: "14px 12px 48px",
   maxWidth: 720,
@@ -675,8 +659,8 @@ const page: React.CSSProperties = {
   color: "#e8eaed",
   minHeight: "100vh",
 };
-const nav: React.CSSProperties = { display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" };
-const tabOn: React.CSSProperties = {
+const nav: CSSProperties = { display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" };
+const tabOn: CSSProperties = {
   padding: "8px 12px",
   borderRadius: 8,
   border: "none",
@@ -685,7 +669,7 @@ const tabOn: React.CSSProperties = {
   fontWeight: 600,
   fontSize: 13,
 };
-const tabOff: React.CSSProperties = {
+const tabOff: CSSProperties = {
   padding: "8px 12px",
   borderRadius: 8,
   border: "1px solid #252a35",
@@ -693,7 +677,7 @@ const tabOff: React.CSSProperties = {
   color: "#c5cae0",
   fontSize: 13,
 };
-const modeOn: React.CSSProperties = {
+const modeOn: CSSProperties = {
   flex: 1,
   padding: "8px",
   borderRadius: 8,
@@ -703,7 +687,7 @@ const modeOn: React.CSSProperties = {
   fontWeight: 600,
   fontSize: 12,
 };
-const modeOff: React.CSSProperties = {
+const modeOff: CSSProperties = {
   flex: 1,
   padding: "8px",
   borderRadius: 8,
@@ -712,13 +696,13 @@ const modeOff: React.CSSProperties = {
   color: "#c5cae0",
   fontSize: 12,
 };
-const card: React.CSSProperties = {
+const card: CSSProperties = {
   background: "#14171e",
   border: "1px solid #252a35",
   borderRadius: 14,
   padding: 14,
 };
-const h2: React.CSSProperties = {
+const h2: CSSProperties = {
   margin: "0 0 10px",
   fontSize: 11,
   fontWeight: 700,
@@ -726,7 +710,7 @@ const h2: React.CSSProperties = {
   textTransform: "uppercase",
   letterSpacing: 0.6,
 };
-const input: React.CSSProperties = {
+const input: CSSProperties = {
   width: "100%",
   boxSizing: "border-box",
   marginBottom: 8,
@@ -737,7 +721,7 @@ const input: React.CSSProperties = {
   color: "#e8eaed",
   fontSize: 14,
 };
-const btn: React.CSSProperties = {
+const btn: CSSProperties = {
   padding: "10px 14px",
   borderRadius: 10,
   border: "none",
@@ -747,7 +731,7 @@ const btn: React.CSSProperties = {
   width: "100%",
   fontSize: 14,
 };
-const smallBtn: React.CSSProperties = {
+const smallBtn: CSSProperties = {
   padding: "6px 10px",
   borderRadius: 8,
   border: "none",
@@ -756,7 +740,7 @@ const smallBtn: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 600,
 };
-const errBox: React.CSSProperties = {
+const errBox: CSSProperties = {
   background: "#2a1215",
   border: "1px solid #7f1d1d",
   padding: 12,
@@ -764,18 +748,18 @@ const errBox: React.CSSProperties = {
   marginBottom: 12,
   fontSize: 13,
 };
-const row: React.CSSProperties = {
+const row: CSSProperties = {
   padding: "8px 0",
   borderBottom: "1px solid #252a35",
   fontSize: 13,
 };
-const contrib: React.CSSProperties = {
+const contrib: CSSProperties = {
   background: "#0b0d12",
   borderRadius: 10,
   padding: 12,
   border: "1px solid #252a35",
 };
-const label: React.CSSProperties = {
+const label: CSSProperties = {
   display: "block",
   fontSize: 11,
   color: "#9aa0a6",

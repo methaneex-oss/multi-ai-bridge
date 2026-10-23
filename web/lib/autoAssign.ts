@@ -35,7 +35,7 @@ const ROLE_PREFS: Record<string, string[]> = {
   researcher: ["reasoning", "general"],
 };
 
-function roleKey(role: string) {
+function roleKey(role: string): string {
   return role.toLowerCase().replace(/\s+/g, "");
 }
 
@@ -53,9 +53,7 @@ function scoreModel(model: ModelInfo, wanted: string[], contextHint: string): nu
   if (ctx.includes("design") || ctx.includes("architect") || ctx.includes("plan")) {
     if (tags.includes("reasoning")) score += 2;
   }
-  // Prefer mid-tier names slightly for balance
   if (/sonnet|gpt-4o[^m]|deepseek-chat|gemini.*flash/.test(id)) score += 1;
-  // Soft penalty for huge expensive ids when fast wanted
   if (wanted.includes("fast") && /opus|o1|o3|gpt-4\.5/.test(id)) score -= 1;
   return score;
 }
@@ -68,13 +66,13 @@ export function autoAssignAgents(
   const enabled = providers.filter((p) => p.enabled && p.api_key);
   if (!enabled.length) return agents;
 
-  // Flatten candidate models with provider id
-  type Cand = { provider_id: string; model: string; tags: string[]; score?: number };
+  type Cand = { provider_id: string; model: string; tags: string[] };
   const pool: Cand[] = [];
   for (const p of enabled) {
-    const models = p.models?.length
-      ? p.models
-      : [{ id: (p as any).default_model || "", tags: ["general"] }];
+    const models =
+      p.models && p.models.length > 0
+        ? p.models
+        : ([{ id: "", tags: ["general"] }] as ModelInfo[]);
     for (const m of models) {
       if (!m.id) continue;
       pool.push({ provider_id: p.id, model: m.id, tags: m.tags || ["general"] });
@@ -85,21 +83,22 @@ export function autoAssignAgents(
   const used = new Set<string>();
 
   return agents.map((agent) => {
-    // Keep manual assignment if both set
     if (agent.provider_id && agent.model) return agent;
 
     const rk = roleKey(agent.role);
-    const wanted =
-      agent.capabilities?.length ||
-      ROLE_PREFS[rk] ||
-      ROLE_PREFS[Object.keys(ROLE_PREFS).find((k) => rk.includes(k)) || ""] ||
-      ["general"];
+    let wanted = agent.capabilities;
+    if (!wanted || wanted.length === 0) {
+      wanted = ROLE_PREFS[rk];
+    }
+    if (!wanted || wanted.length === 0) {
+      const hit = Object.keys(ROLE_PREFS).find((k) => rk.includes(k));
+      wanted = hit ? ROLE_PREFS[hit] : ["general"];
+    }
 
     let best: Cand | null = null;
     let bestScore = -999;
     for (const c of pool) {
       const s = scoreModel({ id: c.model, tags: c.tags }, wanted, projectContext);
-      // slight diversity: prefer unused model ids
       const diversity = used.has(c.model) ? -0.5 : 0;
       const total = s + diversity;
       if (total > bestScore) {
