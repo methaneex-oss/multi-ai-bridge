@@ -22,7 +22,14 @@ type Contribution = {
   contribution_type: string;
 };
 
-type ModelInfo = { id: string; name?: string; tags?: string[]; context?: number | null };
+type ModelInfo = {
+  id: string;
+  name?: string;
+  tags?: string[];
+  context?: number | null;
+  free?: boolean;
+  score?: number;
+};
 
 type Provider = {
   id: string;
@@ -34,17 +41,54 @@ type Provider = {
   models?: ModelInfo[];
   last_test?: string;
   last_ok?: boolean;
+  free_tier?: boolean;
 };
 
 const api = (p: string) => `/api/bridge/${p.replace(/^\//, "")}`;
-const LS_P = "mab_providers_v2";
+const LS_P = "mab_providers_v3";
 const LS_A = "mab_agents_v2";
 
-const PRESETS: Partial<Provider>[] = [
-  { name: "openrouter", base_url: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat" },
-  { name: "openai", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
-  { name: "deepseek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-  { name: "xai", base_url: "https://api.x.ai/v1", model: "grok-3-mini" },
+/** Gateway templates only — models are filled from live free catalog, not hard-coded winners. */
+const FREE_GATEWAYS: {
+  name: string;
+  base_url: string;
+  label: string;
+  hint: string;
+  free_tier: boolean;
+  key_url: string;
+}[] = [
+  {
+    name: "openrouter",
+    base_url: "https://openrouter.ai/api/v1",
+    label: "OpenRouter (recommended)",
+    hint: "One key · many free models · best for coding + analysis",
+    free_tier: true,
+    key_url: "https://openrouter.ai/keys",
+  },
+  {
+    name: "groq",
+    base_url: "https://api.groq.com/openai/v1",
+    label: "Groq",
+    hint: "Fast free tier · OpenAI-compatible",
+    free_tier: true,
+    key_url: "https://console.groq.com/keys",
+  },
+  {
+    name: "deepseek",
+    base_url: "https://api.deepseek.com/v1",
+    label: "DeepSeek",
+    hint: "Strong coding · often low cost (check account balance)",
+    free_tier: false,
+    key_url: "https://platform.deepseek.com/api_keys",
+  },
+  {
+    name: "google",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    label: "Google Gemini",
+    hint: "Free tier via AI Studio · OpenAI-compatible endpoint",
+    free_tier: true,
+    key_url: "https://aistudio.google.com/apikey",
+  },
 ];
 
 export default function Home() {
@@ -69,6 +113,10 @@ export default function Home() {
   const [browseModels, setBrowseModels] = useState<ModelInfo[]>([]);
   const [browseFor, setBrowseFor] = useState<string | null>(null);
   const [modelFilter, setModelFilter] = useState("");
+  const [freeRecs, setFreeRecs] = useState<ModelInfo[]>([]);
+  const [freeUpdated, setFreeUpdated] = useState<string | null>(null);
+  const [loadingFree, setLoadingFree] = useState(false);
+  const [prefer, setPrefer] = useState<"balanced" | "code" | "analysis">("balanced");
 
   useEffect(() => {
     try {
@@ -128,6 +176,29 @@ export default function Home() {
     const id = setInterval(refresh, 12000);
     return () => clearInterval(id);
   }, [refresh]);
+
+  async function loadFreeRecommendations(pref: "balanced" | "code" | "analysis" = prefer) {
+    setLoadingFree(true);
+    setMsg(null);
+    try {
+      const res = await fetch(`/api/recommend-free?prefer=${pref}`, { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to load free models");
+      setFreeRecs(data.recommended || []);
+      setFreeUpdated(data.updated_at || new Date().toISOString());
+      setMsg(`Loaded ${data.count || 0} free models (live rank · ${pref})`);
+    } catch (e: unknown) {
+      setMsg(e instanceof Error ? e.message : "Free catalog failed");
+      setFreeRecs([]);
+    } finally {
+      setLoadingFree(false);
+    }
+  }
+
+  useEffect(() => {
+    if (tab === "providers") loadFreeRecommendations(prefer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   async function publishTask() {
     if (!title.trim()) return;
@@ -196,26 +267,32 @@ export default function Home() {
     }
   }
 
-  async function loadModels(p: Provider) {
-    if (!p.api_key) {
-      setMsg("Add API key before loading models");
-      return;
-    }
+  async function loadModels(p: Provider, freeOnly = false) {
     setLoadingModels(p.id);
     setBrowseFor(p.id);
-    setModelFilter("");
+    setModelFilter(freeOnly ? "free" : "");
     try {
       const res = await fetch("/api/list-models", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base_url: p.base_url, api_key: p.api_key, name: p.name }),
+        body: JSON.stringify({
+          base_url: p.base_url,
+          api_key: p.api_key,
+          name: p.name,
+          free_only: freeOnly,
+          prefer,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "list failed");
       const models: ModelInfo[] = data.models || [];
       setBrowseModels(models);
       setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, models } : x)));
-      setMsg(`Loaded ${models.length} models from ${p.name}`);
+      const topFree = (data.recommended_free || models.filter((m) => m.free))[0];
+      if (topFree?.id && !p.model) {
+        setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, model: topFree.id } : x)));
+      }
+      setMsg(`Loaded ${models.length} models${freeOnly ? " (free only)" : ""}`);
     } catch (e: unknown) {
       setMsg(`Models: ${e instanceof Error ? e.message : "failed"}`);
       setBrowseModels([]);
@@ -224,12 +301,51 @@ export default function Home() {
     }
   }
 
+  function addGateway(g: (typeof FREE_GATEWAYS)[0]) {
+    setForm({
+      name: g.name,
+      base_url: g.base_url,
+      model: "",
+      api_key: "",
+    });
+    setMsg(`${g.label}: base URL filled — paste key, save, then pick a live free model`);
+  }
+
+  function applyFreeModelToOpenRouter(modelId: string) {
+    const id = "openrouter";
+    setProviders((prev) => {
+      const existing = prev.find((p) => p.id === id);
+      const next: Provider = {
+        id,
+        name: "openrouter",
+        base_url: "https://openrouter.ai/api/v1",
+        model: modelId,
+        api_key: existing?.api_key || "",
+        enabled: true,
+        free_tier: true,
+        models: existing?.models,
+        last_test: existing?.last_test,
+        last_ok: existing?.last_ok,
+      };
+      if (existing) return prev.map((p) => (p.id === id ? next : p));
+      return [...prev, next];
+    });
+    setForm((f) => ({
+      ...f,
+      name: "openrouter",
+      base_url: "https://openrouter.ai/api/v1",
+      model: modelId,
+    }));
+    setMsg(`Selected free model ${modelId} — paste OpenRouter key and Save if not saved yet`);
+  }
+
   function saveProvider() {
     if (!form.name.trim() || !form.base_url.trim()) {
       setMsg("Name and base URL required");
       return;
     }
     const id = form.name.toLowerCase().replace(/\s+/g, "-");
+    const gw = FREE_GATEWAYS.find((g) => g.name === id);
     setProviders((prev) => {
       const existing = prev.find((p) => p.id === id);
       const next: Provider = {
@@ -239,6 +355,7 @@ export default function Home() {
         model: form.model.trim() || existing?.model || "",
         api_key: form.api_key || existing?.api_key || "",
         enabled: existing?.enabled ?? true,
+        free_tier: gw?.free_tier ?? existing?.free_tier,
         models: existing?.models,
         last_test: existing?.last_test,
         last_ok: existing?.last_ok,
@@ -248,6 +365,19 @@ export default function Home() {
     });
     setForm({ name: "", base_url: "", model: "", api_key: "" });
     setMsg("Provider saved");
+  }
+
+  function deleteProvider(id: string) {
+    if (typeof window !== "undefined" && !window.confirm(`Delete provider "${id}"?`)) return;
+    setProviders((prev) => prev.filter((x) => x.id !== id));
+    if (browseFor === id) {
+      setBrowseFor(null);
+      setBrowseModels([]);
+    }
+    setAgents((prev) =>
+      prev.map((a) => (a.provider_id === id ? { ...a, provider_id: undefined, model: undefined } : a))
+    );
+    setMsg(`Deleted provider ${id}`);
   }
 
   function doAutoAssign() {
@@ -303,7 +433,9 @@ export default function Home() {
       if (Array.isArray(data.assignments)) {
         setAgents((prev) =>
           prev.map((a) => {
-            const m = data.assignments.find((x: { id: string; provider_id?: string; model?: string }) => x.id === a.id);
+            const m = data.assignments.find(
+              (x: { id: string; provider_id?: string; model?: string }) => x.id === a.id
+            );
             return m ? { ...a, provider_id: m.provider_id, model: m.model } : a;
           })
         );
@@ -337,12 +469,16 @@ export default function Home() {
     { id: "providers", label: "Providers" },
   ];
 
-  const filteredModels = browseModels.filter(
-    (m) =>
-      !modelFilter ||
-      m.id.toLowerCase().includes(modelFilter.toLowerCase()) ||
-      (m.tags || []).some((t) => t.includes(modelFilter.toLowerCase()))
-  );
+  const filteredModels = browseModels.filter((m) => {
+    if (!modelFilter) return true;
+    const f = modelFilter.toLowerCase();
+    if (f === "free") return !!m.free;
+    return (
+      m.id.toLowerCase().includes(f) ||
+      (m.tags || []).some((t) => t.includes(f)) ||
+      (m.name || "").toLowerCase().includes(f)
+    );
+  });
 
   return (
     <main style={page}>
@@ -523,19 +659,117 @@ export default function Home() {
       {tab === "providers" && (
         <>
           <section style={card}>
-            <h2 style={h2}>Providers</h2>
+            <h2 style={h2}>Recommended free models (live)</h2>
+            <p style={{ color: "#9aa0a6", fontSize: 12, margin: "0 0 10px" }}>
+              Ranked from OpenRouter’s live free catalog — not a fixed list. Prefer coding or analysis, then pick a
+              model. You only need an OpenRouter key.
+            </p>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+              {(["balanced", "code", "analysis"] as const).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  style={prefer === p ? modeOn : modeOff}
+                  onClick={() => {
+                    setPrefer(p);
+                    loadFreeRecommendations(p);
+                  }}
+                >
+                  {p}
+                </button>
+              ))}
+              <button type="button" style={smallBtn} disabled={loadingFree} onClick={() => loadFreeRecommendations(prefer)}>
+                {loadingFree ? "Refreshing…" : "Refresh ranks"}
+              </button>
+            </div>
+            {freeUpdated && (
+              <p style={{ color: "#6b7280", fontSize: 11, margin: "0 0 8px" }}>
+                Updated {new Date(freeUpdated).toLocaleString()}
+              </p>
+            )}
+            {!freeRecs.length && !loadingFree && (
+              <p style={{ color: "#9aa0a6", fontSize: 13 }}>No free models loaded — hit Refresh ranks.</p>
+            )}
+            <div style={{ maxHeight: 260, overflow: "auto" }}>
+              {freeRecs.map((m, i) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    background: "transparent",
+                    border: "none",
+                    borderBottom: "1px solid #252a35",
+                    color: "#e8eaed",
+                    cursor: "pointer",
+                    padding: "8px 0",
+                  }}
+                  onClick={() => applyFreeModelToOpenRouter(m.id)}
+                >
+                  <div style={{ fontSize: 13 }}>
+                    <span style={{ color: "#6ee7b7", marginRight: 6 }}>#{i + 1}</span>
+                    {m.id}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#9aa0a6" }}>
+                    free · {(m.tags || []).join(", ")}
+                    {m.context ? ` · ctx ${m.context}` : ""}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section style={{ ...card, marginTop: 12 }}>
+            <h2 style={h2}>Suggested gateways (base URL ready)</h2>
+            <p style={{ color: "#9aa0a6", fontSize: 12, margin: "0 0 10px" }}>
+              No OpenAI. Click a gateway → base URL fills in → paste key → Save → load free models.
+            </p>
+            {FREE_GATEWAYS.map((g) => (
+              <div key={g.name} style={{ ...contrib, marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <div>
+                    <strong>{g.label}</strong>
+                    {g.free_tier && (
+                      <span style={{ marginLeft: 8, fontSize: 11, color: "#6ee7b7" }}>free tier</span>
+                    )}
+                    <div style={{ fontSize: 12, color: "#9aa0a6", marginTop: 4 }}>{g.hint}</div>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginTop: 4, wordBreak: "break-all" }}>
+                      {g.base_url}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button type="button" style={smallBtn} onClick={() => addGateway(g)}>
+                      Use this
+                    </button>
+                    <a href={g.key_url} target="_blank" rel="noreferrer" style={{ ...smallBtn, textDecoration: "none", display: "inline-block" }}>
+                      Get key
+                    </a>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </section>
+
+          <section style={{ ...card, marginTop: 12 }}>
+            <h2 style={h2}>Your providers</h2>
             {!providers.length && (
-              <p style={{ color: "#9aa0a6", fontSize: 13 }}>Add OpenRouter first — one key, many models.</p>
+              <p style={{ color: "#9aa0a6", fontSize: 13 }}>None yet — use a suggested gateway above.</p>
             )}
             {providers.map((p) => (
               <div key={p.id} style={{ ...contrib, marginBottom: 10 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                   <div>
                     <strong>{p.name}</strong>
+                    {p.free_tier && (
+                      <span style={{ marginLeft: 8, fontSize: 11, color: "#6ee7b7" }}>free tier</span>
+                    )}
                     <div style={{ fontSize: 12, color: "#9aa0a6" }}>
-                      {p.model || "(set model)"}
+                      {p.model || "(pick model)"}
                       {p.models?.length ? ` · ${p.models.length} models` : ""}
                     </div>
+                    <div style={{ fontSize: 11, color: "#6b7280", wordBreak: "break-all" }}>{p.base_url}</div>
                     <div style={{ fontSize: 12, color: p.last_ok ? "#6ee7b7" : "#fca5a5", marginTop: 4 }}>
                       {p.last_test || "not tested"}
                     </div>
@@ -544,8 +778,11 @@ export default function Home() {
                     <button type="button" style={smallBtn} onClick={() => testProvider(p)} disabled={testing === p.id}>
                       {testing === p.id ? "…" : "Test"}
                     </button>
-                    <button type="button" style={smallBtn} onClick={() => loadModels(p)} disabled={loadingModels === p.id}>
+                    <button type="button" style={smallBtn} onClick={() => loadModels(p, false)} disabled={loadingModels === p.id}>
                       {loadingModels === p.id ? "…" : "Models"}
+                    </button>
+                    <button type="button" style={smallBtn} onClick={() => loadModels(p, true)} disabled={loadingModels === p.id}>
+                      Free only
                     </button>
                     <button
                       type="button"
@@ -558,11 +795,7 @@ export default function Home() {
                     >
                       {p.enabled ? "Disable" : "Enable"}
                     </button>
-                    <button
-                      type="button"
-                      style={{ ...smallBtn, background: "#7f1d1d" }}
-                      onClick={() => setProviders((prev) => prev.filter((x) => x.id !== p.id))}
-                    >
+                    <button type="button" style={{ ...smallBtn, background: "#7f1d1d" }} onClick={() => deleteProvider(p.id)}>
                       Delete
                     </button>
                   </div>
@@ -576,12 +809,12 @@ export default function Home() {
               <h2 style={h2}>Models — {browseFor}</h2>
               <input
                 style={input}
-                placeholder="Filter (code, claude, deepseek…)"
+                placeholder="Filter (free, code, gemma, nemotron…)"
                 value={modelFilter}
                 onChange={(e) => setModelFilter(e.target.value)}
               />
               <div style={{ maxHeight: 280, overflow: "auto" }}>
-                {filteredModels.slice(0, 80).map((m) => (
+                {filteredModels.slice(0, 100).map((m) => (
                   <button
                     key={m.id}
                     type="button"
@@ -603,7 +836,10 @@ export default function Home() {
                       setMsg(`Default model for ${browseFor}: ${m.id}`);
                     }}
                   >
-                    <div style={{ fontSize: 13 }}>{m.id}</div>
+                    <div style={{ fontSize: 13 }}>
+                      {m.free ? <span style={{ color: "#6ee7b7" }}>free </span> : null}
+                      {m.id}
+                    </div>
                     <div style={{ fontSize: 11, color: "#9aa0a6" }}>{(m.tags || []).join(", ")}</div>
                   </button>
                 ))}
@@ -612,33 +848,10 @@ export default function Home() {
           )}
 
           <section style={{ ...card, marginTop: 12 }}>
-            <h2 style={h2}>Presets</h2>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {PRESETS.map((pr) => (
-                <button
-                  key={pr.name}
-                  type="button"
-                  style={smallBtn}
-                  onClick={() =>
-                    setForm({
-                      name: pr.name || "",
-                      base_url: pr.base_url || "",
-                      model: pr.model || "",
-                      api_key: "",
-                    })
-                  }
-                >
-                  {pr.name}
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section style={{ ...card, marginTop: 12 }}>
-            <h2 style={h2}>Add provider</h2>
-            <input style={input} placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <h2 style={h2}>Add / edit provider</h2>
+            <input style={input} placeholder="Name (e.g. openrouter)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             <input style={input} placeholder="Base URL" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} />
-            <input style={input} placeholder="Default model id" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+            <input style={input} placeholder="Model id (or pick from free list)" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
             <input style={input} placeholder="API key" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} />
             <button type="button" style={btn} onClick={saveProvider}>
               Save provider
