@@ -273,18 +273,33 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title        string   `json:"title"`
-		Description  string   `json:"description"`
-		Instructions string   `json:"instructions"`
-		ProjectID    string   `json:"project_id"`
-		Goals        []string `json:"goals"`
-		Constraints  []string `json:"constraints"`
+		Title           string   `json:"title"`
+		Description     string   `json:"description"`
+		Instructions    string   `json:"instructions"`
+		ProjectID       string   `json:"project_id"`
+		Goals           []string `json:"goals"`
+		Constraints     []string `json:"constraints"`
+		ExpectedVersion *int     `json:"expected_version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), 400)
 		return
 	}
 	s.mu.Lock()
+	if body.ExpectedVersion != nil && *body.ExpectedVersion != s.state.Version {
+		st := s.state
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":            "version_conflict",
+			"expected_version": *body.ExpectedVersion,
+			"current_version":  st.Version,
+			"state":            st,
+			"hint":             "re-read /api/v1/state and retry with current version",
+		})
+		return
+	}
 	s.state.TaskTitle, s.state.TaskDescription = body.Title, body.Description
 	s.state.Instructions = body.Instructions
 	s.state.Goals, s.state.Constraints = body.Goals, body.Constraints
