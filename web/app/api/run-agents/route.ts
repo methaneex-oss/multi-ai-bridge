@@ -97,6 +97,7 @@ function buildMessages(agent: AgentDef, state: any, history: any[], pack: string
       content:
         `You are ${agent.role} (${agent.id}) on a multi-agent engineering bridge.\n` +
         `Follow project rules and training data over guesses.\n` +
+        `Treat memory tagged confidence=verified as stronger than unverified.\n` +
         (pack ? `\n${pack.slice(0, 20000)}\n` : `\n${state.instructions || ""}\n`),
     },
     {
@@ -110,22 +111,73 @@ function buildMessages(agent: AgentDef, state: any, history: any[], pack: string
   ];
 }
 
+/** Record run outcome as memory — never mark LLM prose as verified. */
+async function recordOutcome(opts: {
+  project_id?: string;
+  agent: string;
+  role: string;
+  model: string;
+  ok: boolean;
+  detail?: string;
+  engineering_task_id?: string;
+}) {
+  const kind = opts.ok ? "fact" : "failure";
+  const confidence = "unverified"; // outcomes are observations, not proven architecture facts
+  const content = opts.ok
+    ? `Agent ${opts.agent} (${opts.role}) completed a contribution using model ${opts.model}.`
+    : `Agent ${opts.agent} (${opts.role}) failed: ${opts.detail || "unknown"}`;
+  const provenance = [
+    `agent=${opts.agent}`,
+    `model=${opts.model}`,
+    opts.engineering_task_id ? `task=${opts.engineering_task_id}` : null,
+    `at=${new Date().toISOString()}`,
+  ]
+    .filter(Boolean)
+    .join("; ");
+  try {
+    await bridge("api/v1/memory", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: opts.project_id || "",
+        kind,
+        content,
+        provenance,
+        confidence,
+      }),
+    });
+  } catch {
+    /* memory write must not fail the run response */
+  }
+}
+
 async function runOne(
   agent: AgentDef,
   providers: ProviderInfo[],
   state: any,
   history: any[],
-  pack: string
+  pack: string,
+  projectId: string,
+  engineeringTaskId?: string
 ) {
   const prov = providers.find((p) => p.id === agent.provider_id) || providers[0];
   if (!prov?.api_key || !prov?.base_url) {
-    return {
+    const result = {
       agent: agent.id,
       role: agent.role,
       model: agent.model || "",
       ok: false as const,
       detail: "No provider available for this agent",
     };
+    await recordOutcome({
+      project_id: projectId,
+      agent: agent.id,
+      role: agent.role,
+      model: "",
+      ok: false,
+      detail: result.detail,
+      engineering_task_id: engineeringTaskId,
+    });
+    return result;
   }
   const model =
     agent.model ||
@@ -147,17 +199,35 @@ async function runOne(
         role: agent.role,
         content,
         contribution_type: contributionType(agent.role),
-        metadata: { model, provider: prov.name, mode: "run" },
+        metadata: { model, provider: prov.name, mode: "run", engineering_task_id: engineeringTaskId },
       }),
+    });
+    await recordOutcome({
+      project_id: projectId,
+      agent: agent.id,
+      role: agent.role,
+      model,
+      ok: true,
+      engineering_task_id: engineeringTaskId,
     });
     return { agent: agent.id, role: agent.role, model, ok: true as const };
   } catch (e: any) {
+    const detail = e?.name === "AbortError" ? "LLM timeout (90s)" : e?.message || String(e);
+    await recordOutcome({
+      project_id: projectId,
+      agent: agent.id,
+      role: agent.role,
+      model,
+      ok: false,
+      detail,
+      engineering_task_id: engineeringTaskId,
+    });
     return {
       agent: agent.id,
       role: agent.role,
       model,
       ok: false as const,
-      detail: e?.name === "AbortError" ? "LLM timeout (90s)" : e?.message || String(e),
+      detail,
     };
   }
 }
@@ -176,6 +246,7 @@ export async function POST(req: NextRequest) {
     auto_assign?: boolean;
     mode?: "sequential" | "parallel";
     project_id?: string;
+    engineering_task_id?: string;
   } = {};
   try {
     body = await req.json();
@@ -208,22 +279,25 @@ export async function POST(req: NextRequest) {
 
     const mode = body.mode === "parallel" ? "parallel" : "sequential";
     const results: any[] = [];
+    const engTask = body.engineering_task_id;
 
     if (mode === "parallel") {
       const settled = await Promise.allSettled(
-        agents.map((a) => runOne(a, providers, state, history, pack))
+        agents.map((a) => runOne(a, providers, state, history, pack, pid, engTask))
       );
       for (const s of settled) {
         results.push(s.status === "fulfilled" ? s.value : { ok: false, detail: String(s.reason) });
       }
     } else {
       for (const a of agents) {
-        const r = await runOne(a, providers, state, history, pack);
+        const r = await runOne(a, providers, state, history, pack, pid, engTask);
         results.push(r);
         if (r.ok) {
           try {
             history = await bridge("api/v1/history");
             state = await bridge("api/v1/state");
+            const ctx = await bridge(`api/v1/context${pid ? `?project_id=${encodeURIComponent(pid)}` : ""}`);
+            pack = String(ctx.pack || pack);
           } catch {
             /* */
           }
@@ -251,6 +325,7 @@ export async function POST(req: NextRequest) {
       state,
       history,
       used_project_context: !!pack,
+      memory_recorded: true,
     });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || String(e) }, { status: 500 });
