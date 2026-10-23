@@ -203,7 +203,9 @@ func main() {
 	mux.HandleFunc("/api/v1/knowledge", withCORS(s.auth(s.handleKnowledge)))
 	mux.HandleFunc("/api/v1/engineering-tasks", withCORS(s.auth(s.handleEngineeringTasks)))
 	mux.HandleFunc("/api/v1/memory", withCORS(s.auth(s.handleMemory)))
-	log.Printf("Multi-AI Bridge listening on :%s", port)
+	mux.HandleFunc("/api/v1/export", withCORS(s.auth(s.handleExport)))
+	mux.HandleFunc("/api/v1/import", withCORS(s.auth(s.handleImport)))
+	log.Printf("Multi-AI Bridge listening on :%s db=%s", port, dbPath)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
@@ -271,8 +273,12 @@ func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Title, Description, Instructions, ProjectID string
-		Goals, Constraints                          []string
+		Title        string   `json:"title"`
+		Description  string   `json:"description"`
+		Instructions string   `json:"instructions"`
+		ProjectID    string   `json:"project_id"`
+		Goals        []string `json:"goals"`
+		Constraints  []string `json:"constraints"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), 400)
