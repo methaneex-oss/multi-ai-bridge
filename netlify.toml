@@ -1,0 +1,19 @@
+# Multi-AI Bridge UI on Netlify
+# Site should build from /web (set Base directory = web in Netlify UI if linked via Git)
+
+[build]
+  base = "web"
+  command = "npm install && npm run build"
+  publish = ".next"
+
+# Next.js on Netlify uses the official plugin when available
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Env vars (set in Netlify dashboard or via API):
+# BRIDGE_URL=https://multi-ai-bridge.onrender.com
+# NEXT_PUBLIC_WS_URL=wss://multi-ai-bridge.onrender.com/ws
+# OPENROUTER_API_KEY=optional fallback
