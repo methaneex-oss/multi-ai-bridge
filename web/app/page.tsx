@@ -386,7 +386,6 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-/* Clean light mobile UI */
 const shell: CSSProperties = {
   minHeight: "100vh",
   background: "#fff",
@@ -408,7 +407,7 @@ const topBar: CSSProperties = {
   background: "#fff",
   zIndex: 5,
 };
-const main: CSSProperties = { flex: 1, padding: "16px 16px 88px", overflowY: "auto" };
+const main: CSSProperties = { flex: 1, padding: "16px 16px 160px", overflowY: "auto" };
 const title: CSSProperties = { margin: "0 0 12px", fontSize: 22, fontWeight: 700 };
 const card: CSSProperties = {
   background: "#fafafa",
@@ -484,22 +483,25 @@ const toastErr: CSSProperties = {
 };
 const bottomNav: CSSProperties = {
   position: "fixed",
-  bottom: 0,
+  bottom: 56,
   left: "50%",
   transform: "translateX(-50%)",
   width: "100%",
   maxWidth: 480,
   display: "flex",
   borderTop: "1px solid #eee",
+  borderBottom: "1px solid #eee",
   background: "#fff",
-  padding: "6px 0 calc(6px + env(safe-area-inset-bottom))",
-  zIndex: 10,
+  padding: "10px 0",
+  zIndex: 50,
+  boxShadow: "0 -4px 16px rgba(0,0,0,0.08)",
 };
 const navItem: CSSProperties = {
   flex: 1,
   border: "none",
   background: "transparent",
-  padding: "10px 2px",
-  fontSize: 11,
+  padding: "12px 2px",
+  fontSize: 12,
   cursor: "pointer",
+  minHeight: 44,
 };
