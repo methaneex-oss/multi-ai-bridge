@@ -23,56 +23,36 @@ type EngineeringTask struct {
 }
 
 type MemoryEntry struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"project_id"`
-	Kind        string    `json:"kind"`
-	Content     string    `json:"content"`
-	Provenance  string    `json:"provenance"`
-	Confidence  string    `json:"confidence"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	ProjectID  string    `json:"project_id"`
+	Kind       string    `json:"kind"`
+	Content    string    `json:"content"`
+	Provenance string    `json:"provenance"`
+	Confidence string    `json:"confidence"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 func migrateCoord(db *sql.DB) {
 	_, _ = db.Exec(`
 		CREATE TABLE IF NOT EXISTS engineering_tasks (
-			id TEXT PRIMARY KEY,
-			project_id TEXT,
-			title TEXT NOT NULL,
-			objective TEXT,
-			acceptance TEXT,
-			owner TEXT,
-			status TEXT NOT NULL,
-			depends_on TEXT,
-			evidence TEXT,
-			revision TEXT,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL);
+			id TEXT PRIMARY KEY, project_id TEXT, title TEXT NOT NULL, objective TEXT, acceptance TEXT,
+			owner TEXT, status TEXT NOT NULL, depends_on TEXT, evidence TEXT, revision TEXT,
+			created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS memory_entries (
-			id TEXT PRIMARY KEY,
-			project_id TEXT,
-			kind TEXT NOT NULL,
-			content TEXT NOT NULL,
-			provenance TEXT,
-			confidence TEXT,
-			created_at TEXT NOT NULL);
+			id TEXT PRIMARY KEY, project_id TEXT, kind TEXT NOT NULL, content TEXT NOT NULL,
+			provenance TEXT, confidence TEXT, created_at TEXT NOT NULL);
 	`)
 }
 
-// Handbook task states (Part VII §7.3). Status values are lowercase.
 var taskTransitions = map[string][]string{
-	"proposed":     {"ready", "open", "cancelled"},
-	"ready":        {"assigned", "open", "cancelled"},
-	"assigned":     {"in_progress", "cancelled", "blocked"},
-	"open":         {"in_progress", "assigned", "ready", "cancelled", "blocked"},
-	"in_progress":  {"implemented", "blocked", "failed", "cancelled", "open"},
-	"implemented":  {"under_review", "in_progress", "failed"},
+	"proposed": {"ready", "open", "cancelled"}, "ready": {"assigned", "open", "cancelled"},
+	"assigned": {"in_progress", "cancelled", "blocked"}, "open": {"in_progress", "assigned", "ready", "cancelled", "blocked"},
+	"in_progress": {"implemented", "blocked", "failed", "cancelled", "open"},
+	"implemented": {"under_review", "in_progress", "failed"},
 	"under_review": {"verified", "in_progress", "failed", "cancelled"},
-	"verified":     {"integrated", "in_progress"},
-	"integrated":   {},
-	"blocked":      {"open", "in_progress", "assigned", "cancelled"},
-	"failed":       {"open", "in_progress", "cancelled"},
-	"cancelled":    {"open", "proposed"},
-	"superseded":   {},
+	"verified": {"integrated", "in_progress"}, "integrated": {},
+	"blocked": {"open", "in_progress", "assigned", "cancelled"},
+	"failed": {"open", "in_progress", "cancelled"}, "cancelled": {"open", "proposed"}, "superseded": {},
 }
 
 func normalizeStatus(s string) string {
@@ -135,8 +115,7 @@ func (s *Server) enrichPack(base, projectID string) string {
 		}
 	}
 	rows2, err := s.db.Query(`SELECT kind, content, confidence, provenance FROM memory_entries
-		WHERE project_id = ? OR project_id = '' OR ? = ''
-		ORDER BY created_at DESC LIMIT 30`, projectID, projectID)
+		WHERE project_id = ? OR project_id = '' OR ? = '' ORDER BY created_at DESC LIMIT 30`, projectID, projectID)
 	if err == nil {
 		defer rows2.Close()
 		section := "\n=== PROJECT MEMORY (evidence-tagged) ===\n"
@@ -269,22 +248,25 @@ func (s *Server) handleEngineeringTasks(w http.ResponseWriter, r *http.Request) 
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusConflict)
 				json.NewEncoder(w).Encode(map[string]string{
-					"error": "invalid_transition",
-					"from":  curStatus,
-					"to":    body.Status,
-					"id":    body.ID,
+					"error": "invalid_transition", "from": curStatus, "to": body.Status, "id": body.ID,
 					"hint":  "allowed moves follow handbook task states",
+				})
+				return
+			}
+			if body.Status == "verified" && s.countPassingVerifications(body.ID) == 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]string{
+					"error": "verification_required", "id": body.ID,
+					"hint":  "POST /api/v1/verifications with result=pass before status=verified",
 				})
 				return
 			}
 		}
 		now := time.Now().UTC().Format(time.RFC3339)
 		_, _ = s.db.Exec(`UPDATE engineering_tasks SET
-			status = COALESCE(NULLIF(?, ''), status),
-			evidence = COALESCE(NULLIF(?, ''), evidence),
-			owner = COALESCE(NULLIF(?, ''), owner),
-			revision = COALESCE(NULLIF(?, ''), revision),
-			updated_at = ?
+			status = COALESCE(NULLIF(?, ''), status), evidence = COALESCE(NULLIF(?, ''), evidence),
+			owner = COALESCE(NULLIF(?, ''), owner), revision = COALESCE(NULLIF(?, ''), revision), updated_at = ?
 			WHERE id = ?`, body.Status, body.Evidence, body.Owner, body.Revision, now, body.ID)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "updated", "id": body.ID, "from": curStatus, "to": body.Status})
@@ -327,11 +309,11 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(list)
 	case http.MethodPost:
 		var body struct {
-			ProjectID   string `json:"project_id"`
-			Kind        string `json:"kind"`
-			Content     string `json:"content"`
-			Provenance  string `json:"provenance"`
-			Confidence  string `json:"confidence"`
+			ProjectID  string `json:"project_id"`
+			Kind       string `json:"kind"`
+			Content    string `json:"content"`
+			Provenance string `json:"provenance"`
+			Confidence string `json:"confidence"`
 		}
 		if json.NewDecoder(r.Body).Decode(&body) != nil {
 			http.Error(w, "bad request", 400)
