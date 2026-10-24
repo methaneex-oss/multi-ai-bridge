@@ -1,0 +1,14 @@
+/* Space for bottom tabs + Netlify badge */
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+/* Netlify injects a fixed badge at bottom-right on free sites */
+[data-netlify-badge],
+#netlify-badge {
+  opacity: 0.15 !important;
+  pointer-events: none !important;
+  transform: scale(0.7);
+  transform-origin: bottom right;
+}
