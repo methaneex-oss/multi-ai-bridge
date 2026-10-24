@@ -185,6 +185,7 @@ func main() {
 	s := &Server{db: db, apiKey: apiKey, hub: hub}
 	s.state = State{Roles: make(map[string]string), Goals: []string{}, Constraints: []string{}, OpenQuestions: []string{}, Decisions: []string{}, CurrentStatus: "idle", LastUpdated: time.Now().UTC()}
 	s.loadState()
+	migrateVerifySQL(s)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", withCORS(s.handleRoot))
 	mux.HandleFunc("/health", withCORS(s.handleHealth))
@@ -203,6 +204,7 @@ func main() {
 	mux.HandleFunc("/api/v1/knowledge", withCORS(s.auth(s.handleKnowledge)))
 	mux.HandleFunc("/api/v1/engineering-tasks", withCORS(s.auth(s.handleEngineeringTasks)))
 	mux.HandleFunc("/api/v1/memory", withCORS(s.auth(s.handleMemory)))
+	mux.HandleFunc("/api/v1/verifications", withCORS(s.auth(s.handleVerifications)))
 	mux.HandleFunc("/api/v1/export", withCORS(s.auth(s.handleExport)))
 	mux.HandleFunc("/api/v1/import", withCORS(s.auth(s.handleImport)))
 	log.Printf("Multi-AI Bridge listening on :%s db=%s", port, dbPath)
