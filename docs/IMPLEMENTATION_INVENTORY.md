@@ -1,57 +1,56 @@
 # Implementation inventory (handbook mapping)
 
-Inspected: `methaneex-oss/multi-ai-bridge` @ main · 2026-10-23
-Guide: Advanced Multi-Agent Engineering Platform Handbook v1.0
+Updated: 2026-10-24
 
-Status labels: **designed** | **implemented** | **locally tested** | **live verified** | **not started**
+## Status legend
 
-## Handbook stage alignment
+designed · implemented · live verified · partial · not started
 
-| Stage | Focus | Platform status |
-|-------|--------|-----------------|
-| 1 Reliable execution | Durable task state, agent lifecycle, recovery | Partial — board state + engineering_tasks + export/import; disk on Render free is best-effort |
-| 2 Safe collaboration | Ownership, conflict, integration | **In progress** — agent lock, task transitions, optimistic version; Git integration not started |
-| 3 Shared intelligence | Memory, provenance, version-aware context | Partial — memory_entries + context enrich; no staleness/supersession graph |
-| 4–6 | System validation, adaptive, autonomy | Not started as platform capabilities |
+## Stage progress
+
+| Stage | Status |
+|-------|--------|
+| 1 Reliable execution | partial — durable tasks/memory/export; free disk ephemeral |
+| 2 Safe collaboration | **in progress** — transitions, version conflict, verification gate, agent lock |
+| 3 Shared intelligence | partial — memory + context; no full staleness graph |
+| 4 System-wide validation | **started** — independent verification records |
+| 5–6 Adaptive / autonomy | not started |
 
 ## Capability map
 
-| Handbook concern | Mechanism | Status |
-|------------------|-----------|--------|
-| Orchestrator / shared board | Go `/api/v1/state`, `/task`, WS | live verified |
-| Engineering tasks | `engineering_tasks` + transitions | implemented (redeploy for live verify) |
-| Task status machine §7.3 | `taskTransitions` reject invalid PATCH | implemented |
-| Optimistic concurrency | `expected_version` on POST `/task` → 409 | implemented |
-| Agent lock | `/api/v1/lock` | live verified |
-| Memory + provenance | `memory_entries` confidence/provenance | live verified |
-| Context builder | `/api/v1/context` enrichPack | live verified |
-| Model adapter | OpenAI-compatible via Netlify run-agents | live verified (with provider keys) |
-| Export/import recovery | `/api/v1/export`, `/import` | live verified export |
-| Git / worktrees / merge gates | docs/GIT_COORDINATION.md only | designed |
-| Terminal execution isolation | jobs table; no trusted executor on free Render | partial |
-| Verification records | evidence field on tasks; no verification table | partial |
-| Permission / audit layer | optional BRIDGE_API_KEY | partial |
-| CI regression | `.github/workflows/ci.yml` + coord_test.go | implemented (CI run not asserted here) |
+| Handbook | Mechanism | Status |
+|----------|-----------|--------|
+| Task store + transitions §7.3 | engineering_tasks + taskTransitions | live verified |
+| Implemented ≠ verified §7.3/§8 | verification_records; verified requires pass | implemented (redeploy) |
+| Optimistic concurrency | expected_version on POST /task | live verified |
+| Memory + provenance | memory_entries | live verified |
+| Context package | /context enrichPack | live verified |
+| Agent lock | /lock | live verified |
+| Model adapters | OpenAI-compatible Netlify routes | live verified |
+| UI engineering + verify | EngineeringPanel + expected_version | implemented |
+| Git isolation / merge gates | GIT_COORDINATION.md | designed |
+| Terminal isolation | jobs queue only | partial |
+| Durable storage | export/import | partial |
 
-## Highest-impact gap closed this cycle
+## This cycle (bounded)
 
-Concurrent agents could overwrite board state and jump task status without rules.
+**Gap:** Handbook forbids marking work verified on implementer claim alone.
 
-**Change:** formal task transitions + optional `expected_version` conflict on task updates.
+**Change:**
+- `POST/GET /api/v1/verifications`
+- PATCH status=verified rejected without result=pass verification
+- UI panel to create tasks, advance status, record pass/fail
+- Board task POST sends expected_version
 
-## Next highest-priority gap
+## Still not in line (honest backlog)
 
-1. Live-verify transitions and version conflict after Render redeploy.
-2. UI: show engineering-task status and send `expected_version` from state.
-3. Git coordination (isolated branches, conflict detect) per GIT_COORDINATION.md.
-4. Durable storage beyond free-tier ephemeral disk.
+1. Git worktrees / conflict detection / integration gates
+2. True durable DB (not free Render ephemeral disk)
+3. Memory staleness / supersedes graph
+4. Structured execution service with risk classes
+5. Permission matrix beyond optional API key
+6. Automated end-to-end handbook scenarios (parallel agents, stale context, etc.)
 
-## Authority of state (handbook §2.2)
+## Next action
 
-| Kind | Authority |
-|------|-----------|
-| Code | Git |
-| Operational tasks | SQLite `engineering_tasks` |
-| Board snapshot | SQLite `state` |
-| Experience | SQLite `memory_entries` (does not override current state) |
-| Agent outputs | `contributions` timeline |
+Live-verify verifications API after Render redeploy, then Git coordination slice.
